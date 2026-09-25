@@ -1,0 +1,3 @@
+PySide6>=6.6,<7
+# Live MIDI transport (--headless) additionally needs python-pyalsa, a system
+# package (e.g. `sudo pacman -S python-pyalsa` on Arch), not installable via pip.

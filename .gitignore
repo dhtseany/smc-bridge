@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.venv/
+
+# Informal running dev log; not part of the published project.
+primer.md
