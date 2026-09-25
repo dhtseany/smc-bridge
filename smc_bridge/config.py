@@ -20,7 +20,7 @@ class Mapping:
 
 
 def default_path():
-    return Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "smc_mixer_mac2cc" / "mappings.ini"
+    return Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "smc_bridge" / "mappings.ini"
 
 
 def validate(mappings):

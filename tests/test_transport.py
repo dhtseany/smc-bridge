@@ -2,11 +2,11 @@ import time
 import unittest
 from unittest.mock import patch
 
-from smc_mixer.config import Mapping
+from smc_bridge.config import Mapping
 
 try:
     from pyalsa import alsaseq
-    from smc_mixer.transport import Transport
+    from smc_bridge.transport import Transport
 except ImportError:
     alsaseq = None
     Transport = None
@@ -29,12 +29,12 @@ def eight_with_buttons(strip, name, volume_cc, pan_cc, mute_cc=None, solo_cc=Non
 class TransportTests(unittest.TestCase):
     def setUp(self):
         try:
-            self.transport = Transport(eight((0, "Desk Mic", 11, 12)), clientname="smc-mixer-test")
+            self.transport = Transport(eight((0, "Desk Mic", 11, 12)), clientname="smc-bridge-test")
         except alsaseq.SequencerError as error:
             self.skipTest(f"ALSA sequencer unavailable: {error}")
         self.transport.start()
         self.addCleanup(self.transport.stop)
-        self.listener = alsaseq.Sequencer(clientname="smc-mixer-test-listener")
+        self.listener = alsaseq.Sequencer(clientname="smc-bridge-test-listener")
         cap = alsaseq.SEQ_PORT_CAP_WRITE | alsaseq.SEQ_PORT_CAP_SUBS_WRITE
         port_type = alsaseq.SEQ_PORT_TYPE_MIDI_GENERIC | alsaseq.SEQ_PORT_TYPE_APPLICATION
         self.listen_port = self.listener.create_simple_port("listen", port_type, cap)
@@ -68,7 +68,7 @@ class TransportTests(unittest.TestCase):
 
     def test_fader_move_reaches_mixer_out_as_volume_cc(self):
         self._connect(self.transport.client_id, self.transport.mixer_out, self.listener.client_id, self.listen_port)
-        source = alsaseq.Sequencer(clientname="smc-mixer-test-source")
+        source = alsaseq.Sequencer(clientname="smc-bridge-test-source")
         cap_out = alsaseq.SEQ_PORT_CAP_READ | alsaseq.SEQ_PORT_CAP_SUBS_READ
         port_type = alsaseq.SEQ_PORT_TYPE_MIDI_GENERIC | alsaseq.SEQ_PORT_TYPE_APPLICATION
         out_port = source.create_simple_port("fader", port_type, cap_out)
@@ -90,7 +90,7 @@ class TransportTests(unittest.TestCase):
 
     def test_mixer_volume_feedback_reaches_smc_out_as_pitchbend(self):
         self._connect(self.transport.client_id, self.transport.smc_out, self.listener.client_id, self.listen_port)
-        source = alsaseq.Sequencer(clientname="smc-mixer-test-mixer")
+        source = alsaseq.Sequencer(clientname="smc-bridge-test-mixer")
         cap_out = alsaseq.SEQ_PORT_CAP_READ | alsaseq.SEQ_PORT_CAP_SUBS_READ
         port_type = alsaseq.SEQ_PORT_TYPE_MIDI_GENERIC | alsaseq.SEQ_PORT_TYPE_APPLICATION
         out_port = source.create_simple_port("mixer-out", port_type, cap_out)
@@ -113,13 +113,13 @@ class TransportTests(unittest.TestCase):
     def test_mute_press_lights_led_immediately_without_mixer_feedback(self):
         transport = Transport(
             eight_with_buttons(0, "Desk Mic", 11, 12, mute_cc=13, solo_cc=14),
-            clientname="smc-mixer-test-buttons",
+            clientname="smc-bridge-test-buttons",
         )
         self.addCleanup(transport.stop)
         transport.start()
         self._connect(transport.client_id, transport.mixer_out, self.listener.client_id, self.listen_port)
         self._connect(transport.client_id, transport.smc_out, self.listener.client_id, self.listen_port)
-        source = alsaseq.Sequencer(clientname="smc-mixer-test-button-press")
+        source = alsaseq.Sequencer(clientname="smc-bridge-test-button-press")
         cap_out = alsaseq.SEQ_PORT_CAP_READ | alsaseq.SEQ_PORT_CAP_SUBS_READ
         port_type = alsaseq.SEQ_PORT_TYPE_MIDI_GENERIC | alsaseq.SEQ_PORT_TYPE_APPLICATION
         out_port = source.create_simple_port("mute-button", port_type, cap_out)
@@ -153,7 +153,7 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(received[1].get_data()["note.velocity"], 0)
 
     def _press_transport_button(self, note):
-        source = alsaseq.Sequencer(clientname="smc-mixer-test-transport-press")
+        source = alsaseq.Sequencer(clientname="smc-bridge-test-transport-press")
         cap_out = alsaseq.SEQ_PORT_CAP_READ | alsaseq.SEQ_PORT_CAP_SUBS_READ
         port_type = alsaseq.SEQ_PORT_TYPE_MIDI_GENERIC | alsaseq.SEQ_PORT_TYPE_APPLICATION
         out_port = source.create_simple_port("transport-button", port_type, cap_out)

@@ -1,10 +1,10 @@
 [Unit]
-Description=SMC Mixer background process (MIDI transport pending)
+Description=SMC Bridge — SMC-Mixer to jack_mixer MIDI bridge
 
 [Service]
 Type=exec
 WorkingDirectory=/ai/projects/smc_mixer_mac2cc
-ExecStart=/usr/bin/python3 -m smc_mixer --headless
+ExecStart=/usr/bin/python3 -m smc_bridge --headless
 ExecReload=/usr/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=3

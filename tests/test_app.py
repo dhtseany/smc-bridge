@@ -5,8 +5,8 @@ import tempfile
 import unittest
 
 from PySide6.QtWidgets import QApplication
-from smc_mixer.config import Mapping, load, save, validate
-from smc_mixer.gui import Window
+from smc_bridge.config import Mapping, load, save, validate
+from smc_bridge.gui import Window
 
 
 class ConfigTests(unittest.TestCase):

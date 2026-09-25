@@ -182,7 +182,7 @@ class Window(QMainWindow):
         self.draft_dirty = False
         self.dirty = False
         self.load_failed = False
-        self.setWindowTitle("SMC Mixer — Channel mapping")
+        self.setWindowTitle("SMC Bridge — Channel mapping")
         self.resize(1380, 800)
         self.setStyleSheet(STYLE)
         initial_error = None
@@ -357,7 +357,7 @@ class Window(QMainWindow):
         for index, strip in enumerate(self.strips):
             strip.refresh(self.mappings[index], index == self.selected)
         unsaved = self.dirty or self.draft_dirty
-        self.setWindowTitle(f"SMC Mixer — Channel mapping{' *' if unsaved else ''}")
+        self.setWindowTitle(f"SMC Bridge — Channel mapping{' *' if unsaved else ''}")
         self.save_button.setEnabled(not self.load_failed)
         self.apply_button.setEnabled(not self.load_failed)
 

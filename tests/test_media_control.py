@@ -6,7 +6,7 @@ logic itself verified so it's ready to re-enable later without a rewrite.
 import unittest
 from unittest.mock import patch
 
-from smc_mixer.media_control import play_pause_action, run_media_action
+from smc_bridge.media_control import play_pause_action, run_media_action
 
 
 class PlayPauseActionTests(unittest.TestCase):
@@ -28,14 +28,14 @@ class PlayPauseActionTests(unittest.TestCase):
 
 class RunMediaActionTests(unittest.TestCase):
     def test_runs_playerctl_when_installed(self):
-        with patch("smc_mixer.media_control.shutil.which", return_value="/usr/bin/playerctl"), \
-             patch("smc_mixer.media_control.subprocess.Popen") as popen:
+        with patch("smc_bridge.media_control.shutil.which", return_value="/usr/bin/playerctl"), \
+             patch("smc_bridge.media_control.subprocess.Popen") as popen:
             run_media_action("play")
             self.assertEqual(popen.call_args.args[0], ["playerctl", "play"])
 
     def test_logs_and_noops_when_missing(self):
-        with patch("smc_mixer.media_control.shutil.which", return_value=None), \
-             patch("smc_mixer.media_control.subprocess.Popen") as popen, \
+        with patch("smc_bridge.media_control.shutil.which", return_value=None), \
+             patch("smc_bridge.media_control.subprocess.Popen") as popen, \
              self.assertLogs(level="WARNING"):
             run_media_action("pause")
             popen.assert_not_called()

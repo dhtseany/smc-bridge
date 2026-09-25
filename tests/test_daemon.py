@@ -7,8 +7,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from smc_mixer.config import Mapping, save
-from smc_mixer.daemon import ConfigurationState, InstanceLock
+from smc_bridge.config import Mapping, save
+from smc_bridge.daemon import ConfigurationState, InstanceLock
 
 
 class DaemonTests(unittest.TestCase):
@@ -49,7 +49,7 @@ class DaemonTests(unittest.TestCase):
             env.pop("WAYLAND_DISPLAY", None)
             path = Path(directory) / "mappings.ini"
             process = subprocess.Popen(
-                [sys.executable, "-S", "-m", "smc_mixer", "--headless", "--config", str(path)],
+                [sys.executable, "-S", "-m", "smc_bridge", "--headless", "--config", str(path)],
                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
             try:

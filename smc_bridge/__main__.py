@@ -19,8 +19,8 @@ def main():
     except ImportError as error:
         parser.exit(1, f"Missing GUI dependency: {error}\nInstall PySide6; on Arch Linux: sudo pacman -S pyside6\n")
     app = QApplication(sys.argv[:1])
-    app.setApplicationName("SMC Mixer")
-    app.setOrganizationName("smc_mixer_mac2cc")
+    app.setApplicationName("SMC Bridge")
+    app.setOrganizationName("smc_bridge")
     window = Window(args.config.expanduser())
     window.show()
     return app.exec()

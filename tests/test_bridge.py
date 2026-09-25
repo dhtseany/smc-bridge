@@ -1,7 +1,7 @@
 import unittest
 
-from smc_mixer.bridge import Bridge, PAN_CENTER, cc_to_pitchbend, pitchbend_to_cc, relative_delta
-from smc_mixer.config import Mapping
+from smc_bridge.bridge import Bridge, PAN_CENTER, cc_to_pitchbend, pitchbend_to_cc, relative_delta
+from smc_bridge.config import Mapping
 
 
 def eight(*assigned):

@@ -22,7 +22,7 @@ class InstanceLock:
     """One background bridge per user, regardless of configuration path."""
     def __enter__(self):
         base = os.environ.get("XDG_RUNTIME_DIR")
-        directory = Path(base) / "smc_mixer_mac2cc" if base else Path(tempfile.gettempdir()) / f"smc_mixer_mac2cc-{os.getuid()}"
+        directory = Path(base) / "smc_bridge" if base else Path(tempfile.gettempdir()) / f"smc_bridge-{os.getuid()}"
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = directory.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
@@ -73,7 +73,7 @@ class ConfigurationState:
 
 
 def run(path):
-    level = logging.DEBUG if os.environ.get("SMC_MIXER_DEBUG") else logging.INFO
+    level = logging.DEBUG if os.environ.get("SMC_BRIDGE_DEBUG") else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)s %(message)s")
     stop = threading.Event()
     reload_requested = threading.Event()

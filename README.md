@@ -1,4 +1,4 @@
-# SMC Mixer
+# SMC Bridge
 
 A Linux desktop mapping interface for the M-Vave/SINCO SMC-Mixer and
 jack_mixer. Built with Python 3.10+ and Qt 6 (PySide6).
@@ -27,14 +27,14 @@ sudo pacman -S python pyside6
 From this project directory:
 
 ```sh
-python3 -m smc_mixer
+python3 -m smc_bridge
 ```
 
 In this workspace, the exact commands are:
 
 ```sh
 cd /ai/projects/smc_mixer_mac2cc
-python3 -m smc_mixer
+python3 -m smc_bridge
 ```
 
 Run from a terminal in your graphical desktop session. No web server or build
@@ -66,13 +66,13 @@ reported and protected against overwriting; correct it and click Reload saved.
 The human-readable INI file defaults to:
 
 ```text
-~/.config/smc_mixer_mac2cc/mappings.ini
+~/.config/smc_bridge/mappings.ini
 ```
 
 `XDG_CONFIG_HOME` is honored. Use a separate configuration for experiments:
 
 ```sh
-python3 -m smc_mixer --config /tmp/smc-mixer-demo.ini
+python3 -m smc_bridge --config /tmp/smc-bridge-demo.ini
 ```
 
 ## Development checks
@@ -137,7 +137,7 @@ afterward — don't trust an auto-restored link. RaySession/PipeWire can show
 a link as connected (both in the canvas and in `pw-link -l`) while it's
 actually still pointing at a dead port from the previous process instance,
 silently dropping all data. Disconnect and reconnect fresh. Set
-`SMC_MIXER_DEBUG=1` before `--headless` to log every MIDI event the bridge
+`SMC_BRIDGE_DEBUG=1` before `--headless` to log every MIDI event the bridge
 receives if you need to check whether data is actually arriving.
 
 **Transport row (Play/Pause/Record/Rewind/Fast forward/bank/arrows)**: all
@@ -146,11 +146,11 @@ bridge.py) but none currently do anything — intentional. A play/pause →
 system audio feature (via playerctl's MPRIS integration) was built and
 confirmed working against real hardware, then parked at the user's request
 as an optional add-on for later rather than always-on behavior; see
-smc_mixer/media_control.py's docstring for the one-paragraph re-enable
+smc_bridge/media_control.py's docstring for the one-paragraph re-enable
 instructions.
 
 Two defaults are still unverified against hardware and easy to flip if wrong
-(see `smc_mixer/bridge.py` and `smc_mixer/transport.py`):
+(see `smc_bridge/bridge.py` and `smc_bridge/transport.py`):
 which encoder value (1 vs 65) increases pan, and jack_mixer's MIDI channel
 for CC feedback (currently assumed to be channel 0).
 
@@ -161,7 +161,7 @@ import Qt or require a display. It owns MIDI transport when `python-pyalsa`
 is available; see "Live MIDI bridge" above. You can try its lifecycle now:
 
 ```sh
-python3 -m smc_mixer --headless
+python3 -m smc_bridge --headless
 ```
 
 Ctrl+C stops this foreground invocation. The process reloads saved configuration
@@ -178,13 +178,13 @@ background process through the shared file. Both modes accept `--config`.
 
 The supplied unit targets this checkout and `/usr/bin/python3`. If you relocate
 the project or use a virtual environment, edit `WorkingDirectory` and `ExecStart`
-in `systemd/smc-mixer.service` before installation. Install and enable it with:
+in `systemd/smc-bridge.service` before installation. Install and enable it with:
 
 ```sh
 mkdir -p ~/.config/systemd/user
-cp systemd/smc-mixer.service ~/.config/systemd/user/
+cp systemd/smc-bridge.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now smc-mixer.service
+systemctl --user enable --now smc-bridge.service
 ```
 
 Run these commands from the project directory. Stop any manually launched
@@ -195,12 +195,12 @@ the application. Service configuration follows the
 [systemd service documentation](https://github.com/systemd/systemd/blob/main/man/systemd.service.xml).
 
 ```sh
-systemctl --user status smc-mixer.service
-journalctl --user -u smc-mixer.service -f
-systemctl --user reload smc-mixer.service
-systemctl --user stop smc-mixer.service
+systemctl --user status smc-bridge.service
+journalctl --user -u smc-bridge.service -f
+systemctl --user reload smc-bridge.service
+systemctl --user stop smc-bridge.service
 # Stop and remove login startup:
-systemctl --user disable --now smc-mixer.service
+systemctl --user disable --now smc-bridge.service
 ```
 
 The default mapping file is the same as the GUI's. If your desktop terminal and
