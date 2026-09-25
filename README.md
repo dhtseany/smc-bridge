@@ -1,7 +1,9 @@
 # SMC Bridge
 
-A Linux desktop mapping interface for the M-Vave/SINCO SMC-Mixer and
-jack_mixer. Built with Python 3.10+ and Qt 6 (PySide6).
+A bridge app, written in Python, that works between an M-Vave SMC-Mixer
+and jack_mixer using mac2CC (MIDI Absolute Control to CC). Linux desktop
+mapping GUI plus a headless daemon; built with Python 3.10+ and Qt 6
+(PySide6).
 
 License: [GPLv3](LICENSE).
 
