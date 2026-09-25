@@ -3,8 +3,7 @@ Description=SMC Bridge — SMC-Mixer to jack_mixer MIDI bridge
 
 [Service]
 Type=exec
-WorkingDirectory=/ai/projects/smc_mixer_mac2cc
-ExecStart=/usr/bin/python3 -m smc_bridge --headless
+ExecStart=/usr/bin/smc-bridge --headless
 ExecReload=/usr/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=3

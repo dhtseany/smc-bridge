@@ -18,7 +18,30 @@ beside each fader, BT and Shift at the upper right, and eleven transport/navigat
 buttons along the bottom. These additional buttons are inactive visual references
 with descriptive tooltips; unverified functions remain explicitly unverified.
 
-## Launch on Arch Linux
+## Install on Arch Linux
+
+Build and install with the supplied `PKGBUILD`:
+
+```sh
+makepkg -si
+```
+
+This installs the `smc-bridge` command, its `python-pyside6` dependency, and
+the systemd user unit. `python-pyalsa` (needed for the live MIDI transport,
+see "Live MIDI bridge" below) is an optional dependency; install it too if you
+want live hardware control rather than just the mapping GUI:
+
+```sh
+sudo pacman -S --asdeps python-pyalsa
+```
+
+Then launch the GUI:
+
+```sh
+smc-bridge
+```
+
+## Run from source
 
 Install the GUI dependency if needed:
 
@@ -32,16 +55,8 @@ From this project directory:
 python3 -m smc_bridge
 ```
 
-In this workspace, the exact commands are:
-
-```sh
-cd /ai/projects/smc_mixer_mac2cc
-python3 -m smc_bridge
-```
-
 Run from a terminal in your graphical desktop session. No web server or build
-step is needed. Python and PySide6 are already available in the development
-environment used for this initial version.
+step is needed.
 
 Alternatively, install `requirements.txt` in a Python virtual environment.
 
@@ -178,9 +193,15 @@ background process through the shared file. Both modes accept `--config`.
 
 ### Run as a systemd user service
 
-The supplied unit targets this checkout and `/usr/bin/python3`. If you relocate
-the project or use a virtual environment, edit `WorkingDirectory` and `ExecStart`
-in `systemd/smc-bridge.service` before installation. Install and enable it with:
+Installing the `PKGBUILD` (see "Install on Arch Linux" above) places the unit
+at `/usr/lib/systemd/user/smc-bridge.service` automatically — skip straight to
+`systemctl --user enable --now smc-bridge.service` below.
+
+Running from source instead? The supplied unit expects `smc-bridge` on `PATH`
+(e.g. installed with `pip install .` or in an active virtualenv); edit
+`ExecStart` in `systemd/smc-bridge.service` if you're using a virtual
+environment's own `python3 -m smc_bridge --headless`. Install and enable it
+with:
 
 ```sh
 mkdir -p ~/.config/systemd/user
@@ -189,11 +210,11 @@ systemctl --user daemon-reload
 systemctl --user enable --now smc-bridge.service
 ```
 
-Run these commands from the project directory. Stop any manually launched
-headless process first. The service runs under your user account, starts with your
-user manager (normally at login), and restarts on failure; no system-wide daemon
-or root privileges are needed. It is not installed or enabled automatically by
-the application. Service configuration follows the
+Stop any manually launched headless process first. The service runs under
+your user account, starts with your user manager (normally at login), and
+restarts on failure; no system-wide daemon or root privileges are needed. It
+is not installed or enabled automatically by the application. Service
+configuration follows the
 [systemd service documentation](https://github.com/systemd/systemd/blob/main/man/systemd.service.xml).
 
 ```sh
