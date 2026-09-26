@@ -82,6 +82,25 @@ class Bridge:
     mute_state: list = field(default_factory=lambda: [False] * 8)
     solo_state: list = field(default_factory=lambda: [False] * 8)
 
+    def update_mappings(self, mappings):
+        """Swap in new mappings on config reload.
+
+        Per-strip state is tied to the jack_mixer control it tracks, so each
+        piece is reset to its default when that strip's control CC changes
+        (including becoming unassigned); otherwise the next encoder turn or
+        button press would carry the old channel's value onto the new one.
+        State for unchanged controls is kept.
+        """
+        mappings = list(mappings)
+        for strip, (old, new) in enumerate(zip(self.mappings, mappings)):
+            if (old.assigned, old.pan_cc) != (new.assigned, new.pan_cc):
+                self.pan_state[strip] = PAN_CENTER
+            if (old.assigned, old.mute_cc) != (new.assigned, new.mute_cc):
+                self.mute_state[strip] = False
+            if (old.assigned, old.solo_cc) != (new.assigned, new.solo_cc):
+                self.solo_state[strip] = False
+        self.mappings = mappings
+
     def _volume_ccs(self):
         return {m.volume_cc: i for i, m in enumerate(self.mappings) if m.assigned}
 

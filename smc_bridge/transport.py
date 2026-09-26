@@ -53,7 +53,7 @@ class Transport:
 
     def update_mappings(self, mappings):
         with self._lock:
-            self.bridge.mappings = list(mappings)
+            self.bridge.update_mappings(mappings)
 
     def _send_controller(self, port, channel, param, value):
         event = alsaseq.SeqEvent(alsaseq.SEQ_EVENT_CONTROLLER)

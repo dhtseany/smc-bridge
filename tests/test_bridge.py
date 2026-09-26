@@ -164,5 +164,37 @@ class BridgeButtonTests(unittest.TestCase):
         self.assertFalse(bridge.solo_state[1])
 
 
+class UpdateMappingsTests(unittest.TestCase):
+    def test_remapped_pan_starts_from_center_not_old_channels_value(self):
+        # Review review-96df2ff3e4: stale pan state leaked onto the new channel.
+        bridge = Bridge(eight((0, "Mic", 10, 11)))
+        bridge.on_encoder(16, 63)
+        self.assertEqual(bridge.pan_state[0], 127)
+        bridge.update_mappings(eight((0, "Guitar", 20, 21)))
+        self.assertEqual(bridge.on_encoder(16, 1), (21, PAN_CENTER + 1))
+
+    def test_unchanged_mapping_keeps_pan_state(self):
+        bridge = Bridge(eight((0, "Mic", 10, 11)))
+        bridge.on_encoder(16, 10)
+        bridge.update_mappings(eight((0, "Renamed", 10, 11)))
+        self.assertEqual(bridge.pan_state[0], PAN_CENTER + 10)
+
+    def test_unassigned_then_reassigned_strip_resets_pan(self):
+        bridge = Bridge(eight((0, "Mic", 10, 11)))
+        bridge.on_encoder(16, 20)
+        bridge.update_mappings(eight())
+        bridge.update_mappings(eight((0, "Mic", 10, 11)))
+        self.assertEqual(bridge.pan_state[0], PAN_CENTER)
+
+    def test_remapped_mute_and_solo_reset_independently(self):
+        bridge = Bridge(eight_with_buttons(1, "Mic", 10, 11, mute_cc=12, solo_cc=13))
+        bridge.on_mute_button(17, 127)
+        bridge.on_solo_button(9, 127)
+        bridge.update_mappings(eight_with_buttons(1, "Mic", 10, 11, mute_cc=22, solo_cc=13))
+        self.assertFalse(bridge.mute_state[1])
+        self.assertTrue(bridge.solo_state[1])
+        self.assertEqual(bridge.on_mute_button(17, 127), (22, 127))
+
+
 if __name__ == "__main__":
     unittest.main()
