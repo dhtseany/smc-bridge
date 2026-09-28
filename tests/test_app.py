@@ -5,47 +5,107 @@ import tempfile
 import unittest
 
 from PySide6.QtWidgets import QApplication
-from smc_bridge.config import Mapping, load, save, validate
+from smc_bridge.config import Config, KeyAction, Mapping, load, save, validate
 from smc_bridge.gui import Window
+
+
+def config(*mappings, **keys):
+    """Config with the given leading strip mappings and key actions (key ids use __ for '.')."""
+    return Config(list(mappings) + [Mapping() for _ in range(8 - len(mappings))],
+                  {key.replace("__", "."): action for key, action in keys.items()})
+
+
+V1_FILE = """[app]
+format_version = 1
+
+[strip1]
+name = Desk Mic
+volume_cc = 11
+pan_cc = 12
+mute_cc = 13
+solo_cc =
+""" + "".join(f"\n[strip{i}]\nname =\nvolume_cc =\npan_cc =\nmute_cc =\nsolo_cc =\n" for i in range(2, 9))
 
 
 class ConfigTests(unittest.TestCase):
     def test_roundtrip_and_conflict_preserves_saved_file(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "nested" / "mappings.ini"
-            mappings = [Mapping("Desk Mic 100%", 11, 12)] + [Mapping() for _ in range(7)]
-            save(path, mappings)
-            self.assertEqual(load(path), mappings)
+            original_config = config(Mapping("Desk Mic 100%", 11, 12))
+            save(path, original_config)
+            self.assertEqual(load(path), original_config)
             original = path.read_bytes()
-            mappings[1] = Mapping("PC", 12, 15)
+            original_config.mappings[1] = Mapping("PC", 12, 15)
             with self.assertRaisesRegex(ValueError, "already used"):
-                save(path, mappings)
+                save(path, original_config)
             self.assertEqual(path.read_bytes(), original)
 
     def test_invalid_mappings(self):
         for mapping in (Mapping("Mic", 128, 1), Mapping("Mic", 1, None), Mapping("", 1, 2), Mapping("Mic", 1, 1)):
             with self.subTest(mapping=mapping), self.assertRaises(ValueError):
-                validate([mapping] + [Mapping() for _ in range(7)])
+                validate(config(mapping))
 
-    def test_mute_solo_cc_roundtrip(self):
+    def test_every_key_action_kind_roundtrips(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mappings.ini"
-            mappings = [Mapping("Desk Mic", 11, 12, 13, 14)] + [Mapping() for _ in range(7)]
-            save(path, mappings)
-            self.assertEqual(load(path), mappings)
+            expected = config(
+                Mapping("Desk Mic", 11, 12),
+                strip1__mute=KeyAction("midi", 13),
+                transport__record=KeyAction("midi", 40, mode="momentary"),
+                transport__play=KeyAction("media", media="play_pause"),
+                strip3__select=KeyAction("command", command="notify-send 'SMC 100%' \"a; b\" | cat"),
+            )
+            save(path, expected)
+            self.assertEqual(load(path), expected)
 
-    def test_mute_solo_cc_optional_when_assigned(self):
-        mappings = [Mapping("Desk Mic", 11, 12)] + [Mapping() for _ in range(7)]
-        validate(mappings)  # no mute/solo CC assigned; must not raise
+    def test_format_1_mute_solo_migrate_to_toggle_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mappings.ini"
+            path.write_text(V1_FILE)
+            self.assertEqual(load(path), config(Mapping("Desk Mic", 11, 12), strip1__mute=KeyAction("midi", 13)))
 
-    def test_mute_solo_cc_rejected_when_unassigned(self):
-        with self.assertRaisesRegex(ValueError, "assign the strip"):
-            validate([Mapping(mute_cc=13)] + [Mapping() for _ in range(7)])
+    def test_invalid_key_actions(self):
+        for keys in (
+            {"strip9.mute": KeyAction("midi", 13)},
+            {"strip1.mute": KeyAction("midi", None)},
+            {"strip1.mute": KeyAction("midi", 128)},
+            {"strip1.mute": KeyAction("midi", 13, mode="latch")},
+            {"transport.play": KeyAction("media", media="shuffle")},
+            {"transport.play": KeyAction("command", command="  ")},
+            {"transport.play": KeyAction("command", command="a\nb")},
+            {"transport.play": KeyAction("launch")},
+        ):
+            with self.subTest(keys=keys), self.assertRaises(ValueError):
+                validate(Config(config().mappings, keys))
 
-    def test_mute_solo_cc_conflicts_with_other_controls(self):
-        mappings = [Mapping("Desk Mic", 11, 12, mute_cc=12)] + [Mapping() for _ in range(7)]
+    def test_key_cc_conflicts_with_strip_and_other_keys(self):
         with self.assertRaisesRegex(ValueError, "already used"):
-            validate(mappings)
+            validate(config(Mapping("Desk Mic", 11, 12), strip1__mute=KeyAction("midi", 12)))
+        with self.assertRaisesRegex(ValueError, "already used"):
+            validate(config(strip1__mute=KeyAction("midi", 20), strip1__solo=KeyAction("midi", 20)))
+
+    def test_command_keys_require_a_private_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mappings.ini"
+            save(path, config(transport__up=KeyAction("command", command="true")))
+            self.assertEqual(load(path).keys["transport.up"].command, "true")
+            path.chmod(0o666)
+            with self.assertRaisesRegex(ValueError, "not writable by others"):
+                load(path)
+            path.chmod(0o600)
+            Path(directory).chmod(0o777)
+            try:
+                with self.assertRaisesRegex(ValueError, "not writable by others"):
+                    load(path)
+            finally:
+                Path(directory).chmod(0o700)
+
+    def test_non_command_keys_load_from_shared_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mappings.ini"
+            save(path, config(transport__play=KeyAction("media", media="next")))
+            path.chmod(0o666)
+            self.assertEqual(load(path).keys["transport.play"].media, "next")
 
 
 class GuiTests(unittest.TestCase):
@@ -70,14 +130,14 @@ class GuiTests(unittest.TestCase):
         window.volume.setValue(11)
         window.pan.setValue(12)
         window.save_button.click()
-        self.assertEqual(load(self.path)[0], Mapping("Desk Mic", 11, 12))
+        self.assertEqual(load(self.path).mappings[0], Mapping("Desk Mic", 11, 12))
         restored = Window(self.path)
         self.assertEqual(restored.name.text(), "Desk Mic")
         self.assertTrue(restored.enabled.isChecked())
         restored.close()
         window.enabled.setChecked(False)
         window.save_button.click()
-        self.assertEqual(load(self.path)[0], Mapping())
+        self.assertEqual(load(self.path).mappings[0], Mapping())
 
     def test_invalid_edit_blocks_navigation(self):
         window = self.window
@@ -96,7 +156,7 @@ class GuiTests(unittest.TestCase):
         window.pan.setValue(14)
         self.assertFalse(window.apply())
         self.assertIn("already used", window.error.text())
-        self.assertFalse(window.mappings[1].assigned)
+        self.assertFalse(window.config.mappings[1].assigned)
 
     def _assign(self, window, strip_index, name, volume_cc, pan_cc):
         window.select(strip_index)
@@ -111,40 +171,68 @@ class GuiTests(unittest.TestCase):
         window.activateWindow()
         self.app.processEvents()
 
-    def test_mute_button_click_selects_strip_and_focuses_mute_field(self):
+    def test_strip_key_click_selects_key_and_its_strip(self):
         window = self.window
-        self._assign(window, 2, "ICOM", 30, 31)
-        window.select(0)
         self._activate(window)
-        window.strips[2].mute_button.click()
-        self.assertEqual(window.selected, 2)
-        self.assertTrue(window.mute.isEnabled())
-        self.assertTrue(window.mute.hasFocus())
+        window.strips[2].key_buttons["strip3.mute"].click()
+        self.assertEqual((window.selected, window.selected_key), (2, "strip3.mute"))
+        self.assertEqual(window.pages.currentIndex(), 1)
+        self.assertTrue(window.action.hasFocus())
 
-    def test_solo_button_click_selects_strip_and_focuses_solo_field(self):
+    def test_every_key_can_be_given_each_kind_of_action_and_saved(self):
         window = self.window
-        self._assign(window, 3, "PC", 40, 41)
-        window.select(0)
-        self._activate(window)
-        window.strips[3].solo_button.click()
-        self.assertEqual(window.selected, 3)
-        self.assertTrue(window.solo.isEnabled())
-        self.assertTrue(window.solo.hasFocus())
+        window.key_buttons["strip2.mute"].click()
+        window.action.setCurrentIndex(window.action.findData("midi"))
+        window.key_cc.setValue(30)
+        window.key_buttons["transport.record"].click()  # navigating applies the draft
+        window.action.setCurrentIndex(window.action.findData("midi"))
+        window.key_cc.setValue(31)
+        window.mode.setCurrentIndex(window.mode.findData("momentary"))
+        window.key_buttons["transport.play"].click()
+        window.action.setCurrentIndex(window.action.findData("media"))
+        window.media.setCurrentIndex(window.media.findData("next"))
+        window.key_buttons["strip8.select"].click()
+        window.action.setCurrentIndex(window.action.findData("command"))
+        window.command.setText("notify-send hi")
+        self.assertTrue(window.save())
+        self.assertEqual(load(self.path).keys, {
+            "strip2.mute": KeyAction("midi", 30),
+            "transport.record": KeyAction("midi", 31, mode="momentary"),
+            "transport.play": KeyAction("media", media="next"),
+            "strip8.select": KeyAction("command", command="notify-send hi"),
+        })
+        self.assertTrue(window.key_buttons["transport.play"].property("mapped"))
+        self.assertFalse(window.key_buttons["transport.up"].property("mapped"))
 
-    def test_mute_button_click_on_already_selected_strip_still_focuses(self):
+    def test_only_the_chosen_actions_fields_are_shown(self):
+        window = self.window
+        window.show()
+        window.key_buttons["transport.up"].click()
+        for kind, visible in (("", set()), ("midi", {window.key_cc, window.mode}), ("media", {window.media}), ("command", {window.command})):
+            window.action.setCurrentIndex(window.action.findData(kind))
+            with self.subTest(kind=kind):
+                shown = {w for w in (window.key_cc, window.mode, window.media, window.command) if window.key_form.isRowVisible(w)}
+                self.assertEqual(shown, visible)
+
+    def test_invalid_key_blocks_navigation_and_clearing_removes_it(self):
         window = self.window
         self._assign(window, 0, "Desk Mic", 11, 12)
-        self._activate(window)
-        window.volume.setFocus()
-        window.strips[0].mute_button.click()
-        self.assertEqual(window.selected, 0)
-        self.assertTrue(window.mute.hasFocus())
-
-    def test_mute_button_click_on_unassigned_strip_selects_without_crashing(self):
-        window = self.window
-        window.strips[2].mute_button.click()
-        self.assertEqual(window.selected, 2)
-        self.assertFalse(window.mute.isEnabled())
+        window.key_buttons["strip1.mute"].click()
+        window.action.setCurrentIndex(window.action.findData("midi"))
+        window.key_buttons["strip1.solo"].click()
+        self.assertEqual(window.selected_key, "strip1.mute")
+        self.assertIn("Choose the CC", window.error.text())
+        window.key_cc.setValue(12)
+        self.assertFalse(window.apply())
+        self.assertIn("already used", window.error.text())
+        window.key_cc.setValue(13)
+        window.strips[1].button.click()
+        self.assertEqual((window.selected, window.selected_key), (1, None))
+        self.assertEqual(window.config.keys["strip1.mute"], KeyAction("midi", 13))
+        window.key_buttons["strip1.mute"].click()
+        window.action.setCurrentIndex(window.action.findData(""))
+        self.assertTrue(window.apply())
+        self.assertNotIn("strip1.mute", window.config.keys)
 
     def test_corrupt_file_is_protected(self):
         self.path.write_text("not an ini file")

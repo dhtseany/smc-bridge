@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from smc_bridge.config import Mapping, save
+from smc_bridge.config import Config, Mapping, save
 from smc_bridge.daemon import ConfigurationState, InstanceLock
 
 
@@ -17,21 +17,21 @@ class DaemonTests(unittest.TestCase):
             path = Path(directory) / "mappings.ini"
             state = ConfigurationState(path)
             state.refresh(initial=True)
-            mappings = [Mapping("Mic", 11, 12)] + [Mapping() for _ in range(7)]
-            save(path, mappings)
+            config = Config([Mapping("Mic", 11, 12)] + [Mapping() for _ in range(7)])
+            save(path, config)
             self.assertTrue(state.refresh())
-            self.assertEqual(state.mappings, mappings)
+            self.assertEqual(state.config, config)
             path.write_text("bad config")
             with self.assertLogs(level="ERROR"):
                 self.assertFalse(state.refresh())
-            self.assertEqual(state.mappings, mappings)
+            self.assertEqual(state.config, config)
             path.unlink()
             with self.assertLogs(level="ERROR"):
                 self.assertFalse(state.refresh())
-            self.assertEqual(state.mappings, mappings)
-            save(path, [Mapping() for _ in range(8)])
+            self.assertEqual(state.config, config)
+            save(path, Config())
             self.assertTrue(state.refresh())
-            self.assertFalse(state.mappings[0].assigned)
+            self.assertFalse(state.config.mappings[0].assigned)
 
     def test_instance_lock_and_release(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"XDG_RUNTIME_DIR": directory}):

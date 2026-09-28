@@ -1,7 +1,7 @@
 import unittest
 
-from smc_bridge.bridge import Bridge, PAN_CENTER, cc_to_pitchbend, pitchbend_to_cc, relative_delta
-from smc_bridge.config import Mapping
+from smc_bridge.bridge import Bridge, KEY_NOTES, PAN_CENTER, cc_to_pitchbend, pitchbend_to_cc, relative_delta
+from smc_bridge.config import KeyAction, Mapping
 
 
 def eight(*assigned):
@@ -11,10 +11,7 @@ def eight(*assigned):
     return mappings
 
 
-def eight_with_buttons(strip, name, volume_cc, pan_cc, mute_cc=None, solo_cc=None):
-    mappings = [Mapping() for _ in range(8)]
-    mappings[strip] = Mapping(name, volume_cc, pan_cc, mute_cc, solo_cc)
-    return mappings
+MUTE_SOLO = {"strip2.mute": KeyAction("midi", 25), "strip2.solo": KeyAction("midi", 26)}
 
 
 class ScalingTests(unittest.TestCase):
@@ -113,55 +110,77 @@ class BridgeMixerFeedbackTests(unittest.TestCase):
         self.assertEqual((cc, value), (31, 21))
 
 
-class BridgeButtonTests(unittest.TestCase):
+class KeyLayoutTests(unittest.TestCase):
+    def test_every_midi_button_has_a_unique_note(self):
+        self.assertEqual(len(KEY_NOTES), 43)
+        self.assertEqual(len(set(KEY_NOTES.values())), 43)
+
+    def test_strip_and_transport_notes_match_hardware(self):
+        self.assertEqual(KEY_NOTES["strip1.mute"], 16)
+        self.assertEqual(KEY_NOTES["strip2.mute"], 17)
+        self.assertEqual(KEY_NOTES["strip1.solo"], 8)
+        self.assertEqual(KEY_NOTES["strip1.select"], 0)
+        self.assertEqual(KEY_NOTES["strip1.rec"], 24)
+        self.assertEqual(KEY_NOTES["transport.play"], 94)
+        self.assertEqual(KEY_NOTES["transport.right"], 99)
+
+
+class BridgeKeyTests(unittest.TestCase):
     def test_mute_press_toggles_on_then_off(self):
-        bridge = Bridge(eight_with_buttons(1, "ICOM 2", 23, 24, mute_cc=25, solo_cc=26))
-        self.assertEqual(bridge.on_mute_button(17, 127), (25, 127))
-        self.assertEqual(bridge.on_mute_button(17, 127), (25, 0))
+        bridge = Bridge(eight(), MUTE_SOLO)
+        self.assertEqual(bridge.on_key(17, 127), ("midi", 25, 127, True))
+        self.assertEqual(bridge.on_key(17, 127), ("midi", 25, 0, False))
 
     def test_solo_press_toggles_on_then_off(self):
-        bridge = Bridge(eight_with_buttons(1, "ICOM 2", 23, 24, mute_cc=25, solo_cc=26))
-        self.assertEqual(bridge.on_solo_button(9, 127), (26, 127))
-        self.assertEqual(bridge.on_solo_button(9, 127), (26, 0))
+        bridge = Bridge(eight(), MUTE_SOLO)
+        self.assertEqual(bridge.on_key(9, 127), ("midi", 26, 127, True))
+        self.assertEqual(bridge.on_key(9, 127), ("midi", 26, 0, False))
 
-    def test_note_off_release_is_ignored(self):
-        bridge = Bridge(eight_with_buttons(1, "ICOM 2", 23, 24, mute_cc=25, solo_cc=26))
-        self.assertIsNone(bridge.on_mute_button(17, 0))
-        self.assertEqual(bridge.mute_state[1], False)
+    def test_toggle_release_is_ignored(self):
+        bridge = Bridge(eight(), MUTE_SOLO)
+        self.assertIsNone(bridge.on_key(17, 0))
+        self.assertFalse(bridge.key_state.get("strip2.mute", False))
 
-    def test_mute_button_with_no_mute_cc_bound_is_ignored(self):
-        bridge = Bridge(eight((1, "ICOM 2", 23, 24)))
-        self.assertIsNone(bridge.on_mute_button(17, 127))
+    def test_momentary_sends_on_while_held(self):
+        bridge = Bridge(eight(), {"transport.record": KeyAction("midi", 40, mode="momentary")})
+        self.assertEqual(bridge.on_key(95, 127), ("midi", 40, 127, True))
+        self.assertEqual(bridge.on_key(95, 0), ("midi", 40, 0, False))
+        self.assertEqual(bridge.on_key(95, 127), ("midi", 40, 127, True))
 
-    def test_mute_button_on_unassigned_strip_is_ignored(self):
-        bridge = Bridge(eight())
-        self.assertIsNone(bridge.on_mute_button(16, 127))
+    def test_media_and_command_fire_on_press_only(self):
+        bridge = Bridge(eight(), {
+            "transport.play": KeyAction("media", media="play_pause"),
+            "strip1.select": KeyAction("command", command="notify-send hi"),
+        })
+        self.assertEqual(bridge.on_key(94, 127), ("media", "play_pause"))
+        self.assertIsNone(bridge.on_key(94, 0))
+        self.assertEqual(bridge.on_key(0, 127), ("command", "notify-send hi"))
+        self.assertIsNone(bridge.on_key(0, 0))
 
-    def test_mute_button_out_of_range_is_ignored(self):
-        bridge = Bridge(eight_with_buttons(1, "ICOM 2", 23, 24, mute_cc=25, solo_cc=26))
-        self.assertIsNone(bridge.on_mute_button(24, 127))
+    def test_unassigned_and_unknown_keys_are_ignored(self):
+        bridge = Bridge(eight(), MUTE_SOLO)
+        self.assertIsNone(bridge.on_key(16, 127))  # strip 1 mute: no action
+        self.assertIsNone(bridge.on_key(60, 127))  # not a button on the SMC
 
-    def test_mixer_mute_feedback_lights_indicator_and_updates_state(self):
-        bridge = Bridge(eight_with_buttons(1, "ICOM 2", 23, 24, mute_cc=25, solo_cc=26))
-        self.assertEqual(bridge.on_mixer_mute(25, 127), (17, True))
-        self.assertTrue(bridge.mute_state[1])
-        self.assertEqual(bridge.on_mixer_mute(25, 0), (17, False))
-        self.assertFalse(bridge.mute_state[1])
+    def test_mixer_feedback_lights_indicator_and_updates_state(self):
+        bridge = Bridge(eight(), MUTE_SOLO)
+        self.assertEqual(bridge.on_mixer_key(25, 127), (17, True))
+        self.assertTrue(bridge.key_state["strip2.mute"])
+        self.assertEqual(bridge.on_mixer_key(25, 0), (17, False))
+        self.assertEqual(bridge.on_mixer_key(26, 127), (9, True))
+        # A toggle press after feedback continues from the reported state.
+        self.assertEqual(bridge.on_key(9, 127), ("midi", 26, 0, False))
 
-    def test_mixer_solo_feedback_lights_indicator_and_updates_state(self):
-        bridge = Bridge(eight_with_buttons(1, "ICOM 2", 23, 24, mute_cc=25, solo_cc=26))
-        self.assertEqual(bridge.on_mixer_solo(26, 127), (9, True))
-        self.assertTrue(bridge.solo_state[1])
-
-    def test_mixer_mute_feedback_unknown_cc_is_ignored(self):
-        bridge = Bridge(eight_with_buttons(1, "ICOM 2", 23, 24, mute_cc=25, solo_cc=26))
-        self.assertIsNone(bridge.on_mixer_mute(99, 127))
+    def test_mixer_feedback_ignores_unknown_and_momentary_ccs(self):
+        bridge = Bridge(eight(), {"transport.record": KeyAction("midi", 40, mode="momentary")})
+        self.assertIsNone(bridge.on_mixer_key(99, 127))
+        self.assertIsNone(bridge.on_mixer_key(40, 127))
 
     def test_mute_and_solo_are_independent_state(self):
-        bridge = Bridge(eight_with_buttons(1, "ICOM 2", 23, 24, mute_cc=25, solo_cc=26))
-        bridge.on_mute_button(17, 127)
-        self.assertTrue(bridge.mute_state[1])
-        self.assertFalse(bridge.solo_state[1])
+        bridge = Bridge(eight(), MUTE_SOLO)
+        bridge.on_key(17, 127)
+        self.assertTrue(bridge.key_state["strip2.mute"])
+        self.assertFalse(bridge.key_state.get("strip2.solo", False))
 
 
 class UpdateMappingsTests(unittest.TestCase):
@@ -186,14 +205,49 @@ class UpdateMappingsTests(unittest.TestCase):
         bridge.update_mappings(eight((0, "Mic", 10, 11)))
         self.assertEqual(bridge.pan_state[0], PAN_CENTER)
 
-    def test_remapped_mute_and_solo_reset_independently(self):
-        bridge = Bridge(eight_with_buttons(1, "Mic", 10, 11, mute_cc=12, solo_cc=13))
-        bridge.on_mute_button(17, 127)
-        bridge.on_solo_button(9, 127)
-        bridge.update_mappings(eight_with_buttons(1, "Mic", 10, 11, mute_cc=22, solo_cc=13))
-        self.assertFalse(bridge.mute_state[1])
-        self.assertTrue(bridge.solo_state[1])
-        self.assertEqual(bridge.on_mute_button(17, 127), (22, 127))
+    def test_changed_key_actions_reset_state_independently(self):
+        bridge = Bridge(eight(), MUTE_SOLO)
+        bridge.on_key(17, 127)
+        bridge.on_key(9, 127)
+        bridge.update_mappings(eight(), {**MUTE_SOLO, "strip2.mute": KeyAction("midi", 22)})
+        self.assertNotIn("strip2.mute", bridge.key_state)
+        self.assertTrue(bridge.key_state["strip2.solo"])
+        self.assertEqual(bridge.on_key(17, 127), ("midi", 22, 127, True))
+
+    def test_held_momentary_key_removed_on_reload_is_released(self):
+        # Review review-e2e6d855b2: the old CC stayed at 127 forever.
+        bridge = Bridge(eight(), {"transport.record": KeyAction("midi", 40, mode="momentary")})
+        bridge.on_key(95, 127)
+        self.assertEqual(bridge.update_mappings(eight(), {}), [(95, 40)])
+        self.assertIsNone(bridge.on_key(95, 0))
+
+    def test_held_momentary_key_remapped_on_reload_releases_old_cc_only(self):
+        bridge = Bridge(eight(), {"transport.record": KeyAction("midi", 40, mode="momentary")})
+        bridge.on_key(95, 127)
+        releases = bridge.update_mappings(eight(), {"transport.record": KeyAction("midi", 41, mode="momentary")})
+        self.assertEqual(releases, [(95, 40)])
+        self.assertIsNone(bridge.on_key(95, 0))  # never sent 41=127, so no 41=0 either
+        self.assertEqual(bridge.on_key(95, 127), ("midi", 41, 127, True))
+        self.assertEqual(bridge.on_key(95, 0), ("midi", 41, 0, False))
+
+    def test_reload_releases_nothing_when_unchanged_released_or_toggle(self):
+        keys = {"transport.record": KeyAction("midi", 40, mode="momentary"), **MUTE_SOLO}
+        bridge = Bridge(eight(), keys)
+        bridge.on_key(95, 127)
+        bridge.on_key(17, 127)  # toggle on: jack_mixer owns that state, nothing to release
+        self.assertEqual(bridge.update_mappings(eight(), keys), [])
+        self.assertEqual(bridge.on_key(95, 0), ("midi", 40, 0, False))
+        self.assertEqual(bridge.update_mappings(eight(), {}), [])
+
+    def test_stray_momentary_release_is_ignored(self):
+        bridge = Bridge(eight(), {"transport.record": KeyAction("midi", 40, mode="momentary")})
+        self.assertIsNone(bridge.on_key(95, 0))
+
+    def test_update_without_keys_keeps_key_actions(self):
+        bridge = Bridge(eight(), MUTE_SOLO)
+        bridge.on_key(17, 127)
+        bridge.update_mappings(eight((0, "Mic", 10, 11)))
+        self.assertEqual(bridge.on_key(17, 127), ("midi", 25, 0, False))
 
 
 if __name__ == "__main__":

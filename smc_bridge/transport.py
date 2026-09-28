@@ -10,6 +10,7 @@ import threading
 
 from pyalsa import alsaseq
 
+from . import actions
 from .bridge import Bridge
 
 LOG = logging.getLogger(__name__)
@@ -29,9 +30,9 @@ _CAP_OUT = alsaseq.SEQ_PORT_CAP_READ | alsaseq.SEQ_PORT_CAP_SUBS_READ
 class Transport:
     """Owns the ALSA client/ports and a background thread pumping events through a Bridge."""
 
-    def __init__(self, mappings, clientname=CLIENT_NAME):
+    def __init__(self, config, clientname=CLIENT_NAME):
         self.seq = alsaseq.Sequencer(clientname=clientname)
-        self.bridge = Bridge(list(mappings))
+        self.bridge = Bridge(list(config.mappings), dict(config.keys))
         self._lock = threading.Lock()
         self.smc_in = self.seq.create_simple_port("SMC In", _PORT_TYPE, _CAP_IN)
         self.smc_out = self.seq.create_simple_port("SMC Out", _PORT_TYPE, _CAP_OUT)
@@ -51,9 +52,12 @@ class Transport:
         self._stop.set()
         self._thread.join(timeout=2)
 
-    def update_mappings(self, mappings):
+    def update_config(self, config):
         with self._lock:
-            self.bridge.update_mappings(mappings)
+            for note, cc in self.bridge.update_mappings(config.mappings, config.keys):
+                self._send_controller(self.mixer_out, MIXER_MIDI_CHANNEL, cc, 0)
+                self._send_note(self.smc_out, note, False)
+            self.seq.drain_output()
 
     def _send_controller(self, port, channel, param, value):
         event = alsaseq.SeqEvent(alsaseq.SEQ_EVENT_CONTROLLER)
@@ -114,22 +118,23 @@ class Transport:
             if result:
                 cc, cc_value = result
                 self._send_controller(self.mixer_out, MIXER_MIDI_CHANNEL, cc, cc_value)
-        elif event.type == alsaseq.SEQ_EVENT_NOTEON:
-            note, velocity = data["note.note"], data["note.velocity"]
-            # Bottom-row transport buttons (see TRANSPORT_NOTES in bridge.py)
-            # are recognized in hardware terms but intentionally not acted
-            # on here; media_control.py has a parked play/pause feature.
-            for handler in (self.bridge.on_mute_button, self.bridge.on_solo_button):
-                result = handler(note, velocity)
-                if result:
-                    cc, cc_value = result
-                    self._send_controller(self.mixer_out, MIXER_MIDI_CHANNEL, cc, cc_value)
-                    # Light the LED from our own toggle result immediately,
-                    # rather than waiting on jack_mixer to echo it back —
-                    # that echo may not arrive symmetrically for both
-                    # on and off (see primer.md).
-                    self._send_note(self.smc_out, note, cc_value >= 64)
-                    break
+        elif event.type in (alsaseq.SEQ_EVENT_NOTEON, alsaseq.SEQ_EVENT_NOTEOFF):
+            note = data["note.note"]
+            velocity = data["note.velocity"] if event.type == alsaseq.SEQ_EVENT_NOTEON else 0
+            result = self.bridge.on_key(note, velocity)
+            if result is None:
+                return
+            if result[0] == "midi":
+                _, cc, cc_value, is_on = result
+                self._send_controller(self.mixer_out, MIXER_MIDI_CHANNEL, cc, cc_value)
+                # Light the LED from our own result immediately, rather than
+                # waiting on jack_mixer to echo it back — that echo may not
+                # arrive symmetrically for both on and off (see primer.md).
+                self._send_note(self.smc_out, note, is_on)
+            elif result[0] == "media":
+                actions.run_media(result[1])
+            elif result[0] == "command":
+                actions.run_command(result[1])
 
     def _handle_mixer(self, event):
         if event.type != alsaseq.SEQ_EVENT_CONTROLLER:
@@ -143,12 +148,7 @@ class Transport:
             return
         if self.bridge.on_mixer_pan(cc, value) is not None:
             return
-        result = self.bridge.on_mixer_mute(cc, value)
-        if result:
-            note, is_on = result
-            self._send_note(self.smc_out, note, is_on)
-            return
-        result = self.bridge.on_mixer_solo(cc, value)
+        result = self.bridge.on_mixer_key(cc, value)
         if result:
             note, is_on = result
             self._send_note(self.smc_out, note, is_on)

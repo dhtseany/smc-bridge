@@ -18,31 +18,46 @@ PAN_MAX = 127
 PAN_CENTER = 64
 
 # Confirmed on hardware 2026-09-25: strip N's Mute button is Note On/Off,
-# channel 0, note (16 + N-1) (strip 1 = note 16, strip 2 = note 17). Solo
-# follows the same fixed-base-plus-strip-index scheme one octave down, by
-# analogy with the encoders' CC (16 + N-1) pattern; not separately
-# confirmed past strip 1. Select (base note 0) has no jack_mixer control to
-# bind to and is not handled here.
-MUTE_NOTE_BASE = 16
+# channel 0, note (16 + N-1) (strip 1 = note 16, strip 2 = note 17). Solo,
+# Select and R follow the same fixed-base-plus-strip-index scheme; each is
+# confirmed for strip 1 only (primer.md, "Strip buttons").
+SELECT_NOTE_BASE = 0
 SOLO_NOTE_BASE = 8
+MUTE_NOTE_BASE = 16
+REC_NOTE_BASE = 24
 
-# Unverified: assumes jack_mixer treats its Mute/Solo CC as an absolute
+# Unverified: assumes jack_mixer treats a toggle key's CC as an absolute
 # level (>=64 means on) rather than toggling on any received message. If
 # that's wrong, the physical button and jack_mixer's state will diverge
 # after the first press. See primer.md open design question 3.
 BUTTON_ON_THRESHOLD = 64
 
 # Confirmed on hardware 2026-09-25: the bottom transport row, all Note
-# On/Off, channel 0. None of these are wired to any action — reference data
-# only. media_control.py (not currently used anywhere) has a parked
-# play/pause -> system audio feature built on top of this; see its
-# docstring to re-enable.
+# On/Off, channel 0.
 TRANSPORT_NOTES = {
     94: "play", 93: "pause", 95: "record",
     91: "rewind", 92: "fast_forward",
     46: "bank_left", 47: "bank_right",
     96: "up", 97: "down", 98: "left", 99: "right",
 }
+
+STRIP_KEYS = (("select", SELECT_NOTE_BASE), ("solo", SOLO_NOTE_BASE), ("mute", MUTE_NOTE_BASE), ("rec", REC_NOTE_BASE))
+
+
+def _key_notes():
+    notes = {}
+    for strip in range(8):
+        for kind, base in STRIP_KEYS:
+            notes[f"strip{strip + 1}.{kind}"] = base + strip
+    for note, name in TRANSPORT_NOTES.items():
+        notes[f"transport.{name}"] = note
+    return notes
+
+
+# Every button that sends MIDI (BT and Shift send nothing), by stable key id
+# as used in the configuration file: "strip3.mute", "transport.play", ...
+KEY_NOTES = _key_notes()
+NOTE_KEYS = {note: key for key, note in KEY_NOTES.items()}
 
 # Unverified: which relative-encoder value increases pan is not yet confirmed
 # against hardware (primer.md open design question 4). Flip this to change
@@ -76,30 +91,43 @@ def relative_delta(value):
 
 @dataclass
 class Bridge:
-    """Holds per-strip pan/mute/solo state; mappings can be swapped out live on config reload."""
+    """Holds per-strip pan state and per-key on/off state; mappings and key
+    actions can be swapped out live on config reload."""
     mappings: list
+    keys: dict = field(default_factory=dict)
     pan_state: list = field(default_factory=lambda: [PAN_CENTER] * 8)
-    mute_state: list = field(default_factory=lambda: [False] * 8)
-    solo_state: list = field(default_factory=lambda: [False] * 8)
+    key_state: dict = field(default_factory=dict)
 
-    def update_mappings(self, mappings):
-        """Swap in new mappings on config reload.
+    def update_mappings(self, mappings, keys=None):
+        """Swap in new mappings (and key actions, if given) on config reload.
 
-        Per-strip state is tied to the jack_mixer control it tracks, so each
-        piece is reset to its default when that strip's control CC changes
-        (including becoming unassigned); otherwise the next encoder turn or
-        button press would carry the old channel's value onto the new one.
-        State for unchanged controls is kept.
+        State is tied to the jack_mixer control it tracks, so it is reset to
+        its default when that control changes (including becoming
+        unassigned); otherwise the next encoder turn or button press would
+        carry the old channel's value onto the new one. State for unchanged
+        controls is kept.
+
+        Returns [(note, cc)] for momentary MIDI keys that were held down and
+        whose action changed: the transport must send cc=0 and unlight the
+        note, because the eventual physical release will no longer reach
+        the old control.
         """
+        releases = []
         mappings = list(mappings)
         for strip, (old, new) in enumerate(zip(self.mappings, mappings)):
             if (old.assigned, old.pan_cc) != (new.assigned, new.pan_cc):
                 self.pan_state[strip] = PAN_CENTER
-            if (old.assigned, old.mute_cc) != (new.assigned, new.mute_cc):
-                self.mute_state[strip] = False
-            if (old.assigned, old.solo_cc) != (new.assigned, new.solo_cc):
-                self.solo_state[strip] = False
         self.mappings = mappings
+        if keys is not None:
+            keys = dict(keys)
+            for key in list(self.key_state):
+                old = self.keys.get(key)
+                if old != keys.get(key):
+                    if old is not None and old.kind == "midi" and old.mode == "momentary" and self.key_state[key]:
+                        releases.append((KEY_NOTES[key], old.cc))
+                    del self.key_state[key]
+            self.keys = keys
+        return releases
 
     def _volume_ccs(self):
         return {m.volume_cc: i for i, m in enumerate(self.mappings) if m.assigned}
@@ -107,11 +135,8 @@ class Bridge:
     def _pan_ccs(self):
         return {m.pan_cc: i for i, m in enumerate(self.mappings) if m.assigned}
 
-    def _mute_ccs(self):
-        return {m.mute_cc: i for i, m in enumerate(self.mappings) if m.assigned and m.mute_cc is not None}
-
-    def _solo_ccs(self):
-        return {m.solo_cc: i for i, m in enumerate(self.mappings) if m.assigned and m.solo_cc is not None}
+    def _toggle_key_ccs(self):
+        return {a.cc: key for key, a in self.keys.items() if a.kind == "midi" and a.mode == "toggle"}
 
     def on_fader(self, channel, value):
         """Physical fader `channel` (0-7) moved to pitch-bend `value`.
@@ -170,61 +195,53 @@ class Bridge:
         self.pan_state[strip] = max(PAN_MIN, min(PAN_MAX, value))
         return strip
 
-    def _on_button_press(self, note, base, state):
-        strip = note - base
-        if not 0 <= strip <= 7:
-            return None
-        mapping = self.mappings[strip]
-        if not mapping.assigned:
-            return None
-        cc = mapping.mute_cc if base == MUTE_NOTE_BASE else mapping.solo_cc
-        if cc is None:
-            return None
-        state[strip] = not state[strip]
-        return cc, 127 if state[strip] else 0
+    def on_key(self, note, velocity):
+        """Physical button `note` pressed (velocity > 0) or released (0).
 
-    def on_mute_button(self, note, velocity):
-        """Physical Mute button pressed (Note On, velocity > 0) on `note`.
-
-        Toggles this strip's locally tracked mute state and returns
-        (mute_cc, cc_value) to send to jack_mixer, or None if unbound,
-        unassigned, out of range, or a release (velocity 0 / Note Off).
+        Returns what the transport should do, or None:
+          ("midi", cc, cc_value, is_on) — send cc_value on cc to jack_mixer
+              and light (is_on) or unlight the button's LED;
+          ("media", action) — a media command (see actions.MEDIA_ACTIONS);
+          ("command", command_line) — a shell command.
+        Toggle MIDI keys flip on press; momentary MIDI keys send 127 on
+        press and 0 on release. Media and command keys fire on press only.
         """
-        if velocity <= 0:
+        key = NOTE_KEYS.get(note)
+        action = self.keys.get(key)
+        if action is None:
             return None
-        return self._on_button_press(note, MUTE_NOTE_BASE, self.mute_state)
-
-    def on_solo_button(self, note, velocity):
-        """Physical Solo button pressed (Note On, velocity > 0) on `note`.
-
-        Same behavior as on_mute_button, for the solo_cc/solo_state pair.
-        """
-        if velocity <= 0:
+        pressed = velocity > 0
+        if action.kind == "midi":
+            if action.mode == "momentary":
+                # A release only counts if this action saw the press; a key
+                # remapped while held was already released on reload.
+                if not pressed and not self.key_state.get(key, False):
+                    return None
+                is_on = pressed
+            elif pressed:
+                is_on = not self.key_state.get(key, False)
+            else:
+                return None
+            self.key_state[key] = is_on
+            return "midi", action.cc, 127 if is_on else 0, is_on
+        if not pressed:
             return None
-        return self._on_button_press(note, SOLO_NOTE_BASE, self.solo_state)
+        if action.kind == "media":
+            return "media", action.media
+        if action.kind == "command":
+            return "command", action.command
+        return None
 
-    def on_mixer_mute(self, cc, value):
-        """jack_mixer reported CC `cc` = `value` for a mute control.
+    def on_mixer_key(self, cc, value):
+        """jack_mixer reported CC `cc` = `value` for a toggle key's control.
 
-        Updates stored mute state and returns (note, is_on) to light/unlight
-        the physical button's indicator, or None if `cc` is not any strip's
-        configured mute_cc.
+        Updates stored key state and returns (note, is_on) to light/unlight
+        the physical button's LED, or None if `cc` is not any toggle MIDI
+        key's CC.
         """
-        strip = self._mute_ccs().get(cc)
-        if strip is None:
+        key = self._toggle_key_ccs().get(cc)
+        if key is None:
             return None
         is_on = value >= BUTTON_ON_THRESHOLD
-        self.mute_state[strip] = is_on
-        return MUTE_NOTE_BASE + strip, is_on
-
-    def on_mixer_solo(self, cc, value):
-        """jack_mixer reported CC `cc` = `value` for a solo control.
-
-        Same behavior as on_mixer_mute, for the solo_cc/solo_state pair.
-        """
-        strip = self._solo_ccs().get(cc)
-        if strip is None:
-            return None
-        is_on = value >= BUTTON_ON_THRESHOLD
-        self.solo_state[strip] = is_on
-        return SOLO_NOTE_BASE + strip, is_on
+        self.key_state[key] = is_on
+        return KEY_NOTES[key], is_on

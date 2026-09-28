@@ -65,13 +65,38 @@ Alternatively, install `requirements.txt` in a Python virtual environment.
 1. Click a strip's fader, encoder, or channel label.
 2. Check **Assign this strip**, enter a channel name, and enter the volume and
    pan CC numbers configured for that channel in jack_mixer.
-3. Click **Apply strip mapping**. Switching strips also applies valid edits;
+3. Click **Apply**. Switching strips or keys also applies valid edits;
    invalid edits stay visible for correction.
 4. Click **Save mappings** to persist all eight strips. Saving includes the
    current editor's changes. Restart to verify restoration.
 5. Uncheck **Assign this strip** and apply to clear an assignment.
 
-CC numbers must be 0–127 and unique across all assigned volume and pan controls.
+### Key actions
+
+Every button that sends MIDI can be given an action: the M, S, R and □
+buttons on each strip and the eleven transport-row buttons (43 in all; BT
+and Shift send no MIDI). Click a button, choose what happens **When
+pressed**, and Apply. Buttons with an action are highlighted.
+
+- **MIDI CC to jack_mixer**: sends a CC, as Mute and Solo do. *Toggle*
+  flips on/off with each press (127/0), lights the button's LED while on,
+  and follows jack_mixer's feedback on the same CC. *Momentary* sends 127
+  while held and 0 on release.
+- **Media command**: Play / Pause, Next track, Previous track or Stop, sent
+  to the active media player over MPRIS (the same thing a keyboard's media
+  keys trigger). A player that is Playing is preferred, then one that is
+  Paused. Uses `busctl`, which ships with systemd; nothing else to install.
+- **Shell command**: runs a one-line command with `/bin/sh -c`, as you, in
+  the background daemon, once per press. Output is discarded; a non-zero
+  exit is logged with its stderr. The daemon runs as a systemd user service,
+  so commands get that environment (see `systemctl --user show-environment`).
+  Anything a command starts belongs to the service, and stopping or
+  restarting the service stops it too. Commands only load from a
+  configuration file (and directory) that you own and that no one else can
+  write to.
+
+CC numbers must be 0–127 and unique across all assigned volume, pan and key
+MIDI controls.
 The MIDI channel policy will be established with the transport implementation;
 this preview has a single shared CC namespace. Names are descriptive labels;
 jack_mixer channel discovery/configuration is not implemented.
@@ -136,18 +161,17 @@ Translation is deliberately simple:
   `SMC Out`.
 - jack_mixer pan-CC feedback updates the stored pan state only (no hardware
   output — encoders have no absolute position to display).
-- Pressing Mute or Solo toggles a locally tracked on/off state for that
-  strip and sends it as an absolute CC (127=on, 0=off) to jack_mixer if
-  you've bound a Mute CC / Solo CC for that strip (both optional, in the
-  GUI's editor panel). jack_mixer's own Mute/Solo CC feedback updates that
+- Pressing a button runs its key action (see "Key actions" above). A
+  toggle MIDI key keeps a locally tracked on/off state and sends it as an
+  absolute CC (127=on, 0=off); jack_mixer's feedback on that CC updates the
   same state and lights the physical button back (Note On/Off). Confirmed
   on hardware: Mute is Note (16 + strip index), channel 0, for at least
-  strips 1-2. Solo is assumed to be Note (8 + strip index) by analogy but
-  not independently confirmed. **Unverified**: this assumes jack_mixer's
-  Mute/Solo CC is an absolute level, not a toggle-on-any-message control. If
-  the indicator seems to drift out of sync with jack_mixer's actual state,
-  that assumption is the first thing to check (BUTTON_ON_THRESHOLD in
-  bridge.py).
+  strips 1-2. Solo (8 +), Select/□ (0 +) and R (24 +) are confirmed for
+  strip 1 and assumed for the rest by the same pattern. **Unverified**: this
+  assumes jack_mixer's Mute/Solo CC is an absolute level, not a
+  toggle-on-any-message control. If the indicator seems to drift out of sync
+  with jack_mixer's actual state, that assumption is the first thing to
+  check (BUTTON_ON_THRESHOLD in bridge.py).
 
 **Restarting the daemon?** Manually redo its four patchbay connections
 afterward — don't trust an auto-restored link. RaySession/PipeWire can show
@@ -157,14 +181,29 @@ silently dropping all data. Disconnect and reconnect fresh. Set
 `SMC_BRIDGE_DEBUG=1` before `--headless` to log every MIDI event the bridge
 receives if you need to check whether data is actually arriving.
 
-**Transport row (Play/Pause/Record/Rewind/Fast forward/bank/arrows)**: all
-11 bottom-row buttons are confirmed and recognized (see TRANSPORT_NOTES in
-bridge.py) but none currently do anything — intentional. A play/pause →
-system audio feature (via playerctl's MPRIS integration) was built and
-confirmed working against real hardware, then parked at the user's request
-as an optional add-on for later rather than always-on behavior; see
-smc_bridge/media_control.py's docstring for the one-paragraph re-enable
-instructions.
+**Configuration format**: files saved by 1.0.x (format 1, with Mute/Solo
+CCs on each strip) still load; those CCs become toggle MIDI actions on the
+strip's M and S keys, and the file is written as format 2 on the next save.
+Each key with an action is a `[key:<id>]` section, for example:
+
+```ini
+[key:strip1.mute]
+action = midi
+cc = 13
+mode = toggle
+
+[key:transport.play]
+action = media
+media = play_pause
+
+[key:transport.up]
+action = command
+command = notify-send "SMC" "Up pressed"
+```
+
+Key ids are `strip1`–`strip8` with `.mute`, `.solo`, `.rec` or `.select`,
+and `transport.` with `play`, `pause`, `record`, `rewind`, `fast_forward`,
+`bank_left`, `bank_right`, `up`, `down`, `left` or `right`.
 
 Two defaults are still unverified against hardware and easy to flip if wrong
 (see `smc_bridge/bridge.py` and `smc_bridge/transport.py`):

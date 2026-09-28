@@ -44,7 +44,7 @@ class InstanceLock:
 class ConfigurationState:
     def __init__(self, path):
         self.path = path
-        self.mappings = None
+        self.config = None
         self.last_signature = None
 
     def refresh(self, initial=False, force=False):
@@ -61,14 +61,17 @@ class ConfigurationState:
             # file while running must not silently clear all active mappings.
             if not initial and not self.path.exists():
                 raise ValueError("Configuration is missing; retaining the last valid mappings.")
-            mappings = load(self.path)
+            config = load(self.path)
         except (OSError, ValueError) as error:
             if initial:
                 raise
             LOG.error("Configuration reload rejected: %s", error)
             return False
-        self.mappings = mappings
-        LOG.info("Loaded %d assigned strips from %s", sum(m.assigned for m in mappings), self.path)
+        self.config = config
+        LOG.info(
+            "Loaded %d assigned strips and %d key actions from %s",
+            sum(m.assigned for m in config.mappings), len(config.keys), self.path,
+        )
         return True
 
 
@@ -88,7 +91,7 @@ def run(path):
             transport = None
             if Transport is not None:
                 try:
-                    transport = Transport(state.mappings)
+                    transport = Transport(state.config)
                     transport.start()
                     LOG.warning(
                         "MIDI transport active: client %r (id %d), ports SMC In/Out, Mixer In/Out. PID %d",
@@ -104,7 +107,7 @@ def run(path):
                     force = reload_requested.is_set()
                     reload_requested.clear()
                     if state.refresh(force=force) and transport is not None:
-                        transport.update_mappings(state.mappings)
+                        transport.update_config(state.config)
             finally:
                 if transport is not None:
                     transport.stop()

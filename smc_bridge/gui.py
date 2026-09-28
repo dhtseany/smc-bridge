@@ -2,12 +2,39 @@
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QCheckBox, QFormLayout, QFrame, QHBoxLayout,
+    QAbstractButton, QApplication, QCheckBox, QComboBox, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QSpinBox, QVBoxLayout, QWidget,
+    QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from .config import Mapping, load, save, validate
+from .actions import MEDIA_ACTIONS
+from .bridge import KEY_NOTES
+from .config import Config, KeyAction, Mapping, load, save, validate
+
+ACTION_CHOICES = (("", "Nothing"), ("midi", "MIDI CC to jack_mixer"), ("media", "Media command"), ("command", "Shell command"))
+MODE_CHOICES = (("toggle", "Toggle (press on, press off)"), ("momentary", "Momentary (on while held)"))
+STRIP_KEY_BUTTONS = (("mute", "M", "Mute"), ("solo", "S", "Solo"), ("rec", "R", "R button"), ("select", "□", "Square (Select) button"))
+# Exact left-to-right symbol order from the supplied hardware photo.
+TRANSPORT_BUTTONS = (
+    ("play", "▶", "Play"), ("pause", "Ⅱ", "Pause"), ("record", "●", "Record"),
+    ("rewind", "◀◀", "Rewind"), ("fast_forward", "▶▶", "Fast forward"),
+    ("bank_left", "≪", "Double chevron left"), ("bank_right", "≫", "Double chevron right"),
+    ("up", "△", "Up"), ("down", "▽", "Down"), ("left", "◁", "Left"), ("right", "▷", "Right"),
+)
+KEY_NAMES = {
+    **{f"strip{n}.{kind}": f"Strip {n:02} · {name}" for n in range(1, 9) for kind, _, name in STRIP_KEY_BUTTONS},
+    **{f"transport.{kind}": f"Transport · {name}" for kind, _, name in TRANSPORT_BUTTONS},
+}
+
+
+def describe(action):
+    if action is None:
+        return "not assigned"
+    if action.kind == "midi":
+        return f"MIDI CC {action.cc}, {action.mode}"
+    if action.kind == "media":
+        return MEDIA_ACTIONS[action.media][0]
+    return f"runs: {action.command}"
 
 STYLE = """
 QWidget { background: #171b21; color: #e4e9ee; font-family: 'DejaVu Sans'; font-size: 13px; }
@@ -20,6 +47,8 @@ QFrame#strip[selected="true"] { border: 2px solid #50d9bb; background: #23332f; 
 QFrame#strip QLabel { background: transparent; border: none; }
 QFrame#strip QPushButton { padding: 6px 3px; font-size: 11px; }
 QPushButton#hardware { padding: 2px; font-size: 12px; font-weight: bold; color: #b8c5d0; }
+QPushButton#hardware[mapped="true"] { color: #102c25; background: #50d9bb; }
+QPushButton#hardware[selected="true"] { border: 2px solid #e6bc73; }
 QLabel#indicator { background: #10171d; border: 1px solid #45505b; border-radius: 3px; }
 QLabel#number { font-size: 22px; font-weight: bold; color: #a6b4c3; }
 QPushButton { background: #2d3642; border: 1px solid #465465; border-radius: 5px; padding: 9px 12px; }
@@ -27,8 +56,8 @@ QPushButton:hover { background: #394958; border-color: #50d9bb; }
 QPushButton:focus { border: 2px solid #50d9bb; }
 QPushButton#primary { background: #50d9bb; color: #102c25; font-weight: bold; }
 QPushButton:disabled { color: #687582; background: #232a32; border-color: #35404c; }
-QLineEdit, QSpinBox { background: #10151b; border: 1px solid #465465; border-radius: 4px; padding: 8px; }
-QLineEdit:focus, QSpinBox:focus { border-color: #50d9bb; }
+QLineEdit, QSpinBox, QComboBox { background: #10151b; border: 1px solid #465465; border-radius: 4px; padding: 8px; }
+QLineEdit:focus, QSpinBox:focus, QComboBox:focus { border-color: #50d9bb; }
 QLabel#error { color: #ffaba5; }
 QScrollArea { border: none; }
 """
@@ -52,14 +81,21 @@ def hardware_button(text, description):
     return button
 
 
-def mappable_button(text, description, callback):
-    """Like hardware_button, but clickable: jumps the editor to this control's field."""
+def key_button(text, key, callback):
+    """A physical button that can be given an action: opens the key editor."""
     button = QPushButton(text)
     button.setObjectName("hardware")
-    button.setAccessibleName(description)
-    button.setToolTip(f"{description} · click to edit its jack_mixer binding")
-    button.clicked.connect(callback)
+    button.setAccessibleName(f"Edit key {KEY_NAMES[key]}")
+    button.clicked.connect(lambda checked=False: callback(key))
     return button
+
+
+def refresh_key_button(button, key, action, selected):
+    button.setProperty("mapped", action is not None)
+    button.setProperty("selected", selected)
+    button.style().unpolish(button)
+    button.style().polish(button)
+    button.setToolTip(f"{KEY_NAMES[key]} · note {KEY_NOTES[key]} · {describe(action)}\nClick to edit what this key does")
 
 
 class Control(QAbstractButton):
@@ -107,7 +143,7 @@ class Control(QAbstractButton):
 
 
 class Strip(QFrame):
-    def __init__(self, number, callback, field_callback):
+    def __init__(self, number, callback, key_callback):
         super().__init__()
         self.setObjectName("strip")
         self.setMinimumWidth(108)
@@ -137,18 +173,13 @@ class Strip(QFrame):
         controls.addWidget(Control("volume", number, callback), 1)
         buttons = QVBoxLayout()
         buttons.setContentsMargins(0, 12, 0, 18)
-        for index, (text, description, field) in enumerate((
-            ("M", "Mute", "mute"), ("S", "Solo", "solo"),
-            ("R", "R button (function and MIDI mapping unverified)", None),
-            ("□", "Square button (function and MIDI mapping unverified)", None),
-        )):
+        self.key_buttons = {}
+        for index, (kind, text, _) in enumerate(STRIP_KEY_BUTTONS):
             if index:
                 buttons.addStretch()
-            if field:
-                button = mappable_button(text, f"Strip {number}: {description}", lambda checked=False, field=field: field_callback(field))
-                setattr(self, f"{field}_button", button)
-            else:
-                button = hardware_button(text, f"Strip {number}: {description}")
+            key = f"strip{number}.{kind}"
+            button = key_button(text, key, key_callback)
+            self.key_buttons[key] = button
             button.setFixedSize(28, 30)
             buttons.addWidget(button)
         controls.addLayout(buttons)
@@ -178,6 +209,7 @@ class Window(QMainWindow):
         super().__init__()
         self.path = path
         self.selected = 0
+        self.selected_key = None
         self.loading = False
         self.draft_dirty = False
         self.dirty = False
@@ -187,9 +219,9 @@ class Window(QMainWindow):
         self.setStyleSheet(STYLE)
         initial_error = None
         try:
-            self.mappings = load(path)
+            self.config = load(path)
         except (OSError, ValueError) as error:
-            self.mappings = [Mapping() for _ in range(8)]
+            self.config = Config()
             self.load_failed = True
             initial_error = f"Could not load {path}: {error}. Fix the file and reload; saving is disabled to protect it."
         root = QWidget()
@@ -209,7 +241,7 @@ class Window(QMainWindow):
         self.save_button.clicked.connect(self.save)
         top.addWidget(self.save_button)
         outer.addLayout(top)
-        outer.addWidget(label("Select a fader, encoder, channel label, M, or S to map its strip — clicking M or S jumps straight to that field.", "muted"))
+        outer.addWidget(label("Select a fader, encoder or channel label to map its strip, or any button to choose what it does.", "muted"))
         outer.addWidget(label("MAPPING EDITOR   ·   This window edits mappings only; live MIDI runs in the separate background daemon (--headless).", "status"))
         body = QHBoxLayout()
         surface = QWidget()
@@ -225,7 +257,7 @@ class Window(QMainWindow):
             strip = Strip(
                 index + 1,
                 lambda checked=False, index=index: self.select(index),
-                lambda field, index=index: self.select(index, focus=field),
+                self.select_key,
             )
             self.strips.append(strip)
             strips_layout.addWidget(strip)
@@ -242,18 +274,15 @@ class Window(QMainWindow):
         transport = QHBoxLayout()
         transport.setContentsMargins(16, 0, 16, 0)
         transport.setSpacing(10)
-        # Exact left-to-right symbol order from the supplied hardware photo.
-        for symbol, description in (
-            ("▶", "Play"), ("Ⅱ", "Pause"), ("●", "Record"),
-            ("◀◀", "Rewind"), ("▶▶", "Fast forward"),
-            ("≪", "Double chevron left"), ("≫", "Double chevron right"),
-            ("△", "Up"), ("▽", "Down"), ("◁", "Left"), ("▷", "Right"),
-        ):
-            button = hardware_button(symbol, description)
+        self.key_buttons = {key: button for strip in self.strips for key, button in strip.key_buttons.items()}
+        for kind, symbol, _ in TRANSPORT_BUTTONS:
+            key = f"transport.{kind}"
+            button = key_button(symbol, key, self.select_key)
             button.setMinimumSize(44, 28)
+            self.key_buttons[key] = button
             transport.addWidget(button, 1)
         surface_layout.addLayout(transport)
-        legend = label("M  Mute    S  Solo    R / □  Hardware buttons    ·    Additional buttons are preview-only", "muted")
+        legend = label("M  Mute    S  Solo    R / □  Strip buttons    ·    Highlighted buttons have an action    ·    BT and SHIFT send no MIDI", "muted")
         legend.setWordWrap(True)
         surface_layout.addWidget(legend)
         scroll = QScrollArea()
@@ -269,16 +298,19 @@ class Window(QMainWindow):
         self.input_hint = label("", "muted")
         self.input_hint.setWordWrap(True)
         panel.addWidget(self.input_hint)
+        self.pages = QStackedWidget()
+        strip_page = QWidget()
+        strip_layout = QVBoxLayout(strip_page)
+        strip_layout.setContentsMargins(0, 0, 0, 0)
         self.enabled = QCheckBox("Assign this strip")
-        panel.addWidget(self.enabled)
+        strip_layout.addWidget(self.enabled)
         self.name = QLineEdit()
         self.name.setPlaceholderText("e.g. Desk Mic")
         self.name.setMaxLength(80)
         self.volume = QSpinBox()
         self.pan = QSpinBox()
-        self.mute = QSpinBox()
-        self.solo = QSpinBox()
-        for spin in (self.volume, self.pan, self.mute, self.solo):
+        self.key_cc = QSpinBox()
+        for spin in (self.volume, self.pan, self.key_cc):
             spin.setRange(-1, 127)
             spin.setSpecialValueText("Choose CC")
         form = QFormLayout()
@@ -286,16 +318,42 @@ class Window(QMainWindow):
         form.addRow("Mixer channel name", self.name)
         form.addRow("Volume CC", self.volume)
         form.addRow("Pan CC", self.pan)
-        form.addRow("Mute CC (optional)", self.mute)
-        form.addRow("Solo CC (optional)", self.solo)
-        panel.addLayout(form)
-        note = label("Use the CC numbers assigned to this channel in jack_mixer. Names are labels, not automatic discovery. Mute/Solo are optional.", "muted")
+        strip_layout.addLayout(form)
+        note = label("Use the CC numbers assigned to this channel in jack_mixer. Names are labels, not automatic discovery. Mute and Solo are set on their own buttons.", "muted")
         note.setWordWrap(True)
-        panel.addWidget(note)
+        strip_layout.addWidget(note)
+        strip_layout.addStretch()
+        self.pages.addWidget(strip_page)
+
+        key_page = QWidget()
+        self.key_form = QFormLayout(key_page)
+        self.key_form.setContentsMargins(0, 0, 0, 0)
+        self.key_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        self.action = QComboBox()
+        for value, text in ACTION_CHOICES:
+            self.action.addItem(text, value)
+        self.mode = QComboBox()
+        for value, text in MODE_CHOICES:
+            self.mode.addItem(text, value)
+        self.media = QComboBox()
+        for value, (text, _) in MEDIA_ACTIONS.items():
+            self.media.addItem(text, value)
+        self.command = QLineEdit()
+        self.command.setPlaceholderText("e.g. notify-send 'SMC' 'Hello'")
+        self.key_form.addRow("When pressed", self.action)
+        self.key_form.addRow("CC sent to jack_mixer", self.key_cc)
+        self.key_form.addRow("Behavior", self.mode)
+        self.key_form.addRow("Media command", self.media)
+        self.key_form.addRow("Shell command", self.command)
+        self.key_note = label("", "muted")
+        self.key_note.setWordWrap(True)
+        self.key_form.addRow(self.key_note)
+        self.pages.addWidget(key_page)
+        panel.addWidget(self.pages)
         self.error = label("", "error")
         self.error.setWordWrap(True)
         panel.addWidget(self.error)
-        self.apply_button = QPushButton("Apply strip mapping")
+        self.apply_button = QPushButton("Apply")
         self.apply_button.setObjectName("primary")
         self.apply_button.clicked.connect(self.apply)
         panel.addWidget(self.apply_button)
@@ -314,8 +372,10 @@ class Window(QMainWindow):
         self.name.textChanged.connect(self.edited)
         self.volume.valueChanged.connect(self.edited)
         self.pan.valueChanged.connect(self.edited)
-        self.mute.valueChanged.connect(self.edited)
-        self.solo.valueChanged.connect(self.edited)
+        for combo in (self.action, self.mode, self.media):
+            combo.currentIndexChanged.connect(self.edited)
+        self.key_cc.valueChanged.connect(self.edited)
+        self.command.textChanged.connect(self.edited)
         self.populate()
         self.refresh()
         if initial_error:
@@ -324,8 +384,17 @@ class Window(QMainWindow):
             self.feedback.setText("Saved mappings loaded." if path.exists() else "Start by selecting a strip and assigning its mixer channel.")
 
     def edited(self, *_):
-        for widget in (self.name, self.volume, self.pan, self.mute, self.solo):
+        for widget in (self.name, self.volume, self.pan):
             widget.setEnabled(self.enabled.isChecked())
+        kind = self.action.currentData()
+        for widget, kinds in ((self.key_cc, ("midi",)), (self.mode, ("midi",)), (self.media, ("media",)), (self.command, ("command",))):
+            self.key_form.setRowVisible(widget, kind in kinds)
+        self.key_note.setText({
+            "": "This key does nothing.",
+            "midi": "Toggle lights the key's LED while on and follows jack_mixer's feedback on the same CC, like Mute and Solo.",
+            "media": "Sent to the active media player (MPRIS), like a keyboard media key.",
+            "command": "Runs with /bin/sh in the background daemon, as you, once per press.",
+        }[kind])
         if not self.loading:
             self.draft_dirty = True
             self.error.setText("")
@@ -333,21 +402,29 @@ class Window(QMainWindow):
 
     def populate(self):
         self.loading = True
-        mapping = self.mappings[self.selected]
-        self.editor_title.setText(f"Strip {self.selected + 1:02}")
-        self.input_hint.setText(
-            f"Hardware input: pitch bend ch {self.selected}\n"
-            f"Pan encoder: CC {16 + self.selected}, ch 0\n"
-            f"Mute button: note {16 + self.selected}, ch 0\n"
-            f"Solo button: note {8 + self.selected}, ch 0\n"
-            f"(channel numbers are zero-based)"
-        )
-        self.enabled.setChecked(mapping.assigned)
-        self.name.setText(mapping.name)
-        self.volume.setValue(mapping.volume_cc if mapping.volume_cc is not None else -1)
-        self.pan.setValue(mapping.pan_cc if mapping.pan_cc is not None else -1)
-        self.mute.setValue(mapping.mute_cc if mapping.mute_cc is not None else -1)
-        self.solo.setValue(mapping.solo_cc if mapping.solo_cc is not None else -1)
+        if self.selected_key is None:
+            mapping = self.config.mappings[self.selected]
+            self.pages.setCurrentIndex(0)
+            self.editor_title.setText(f"Strip {self.selected + 1:02}")
+            self.input_hint.setText(
+                f"Hardware input: pitch bend ch {self.selected}\n"
+                f"Pan encoder: CC {16 + self.selected}, ch 0\n"
+                f"(channel numbers are zero-based)"
+            )
+            self.enabled.setChecked(mapping.assigned)
+            self.name.setText(mapping.name)
+            self.volume.setValue(mapping.volume_cc if mapping.volume_cc is not None else -1)
+            self.pan.setValue(mapping.pan_cc if mapping.pan_cc is not None else -1)
+        else:
+            action = self.config.keys.get(self.selected_key) or KeyAction("")
+            self.pages.setCurrentIndex(1)
+            self.editor_title.setText(KEY_NAMES[self.selected_key].split(" · ")[1])
+            self.input_hint.setText(f"{KEY_NAMES[self.selected_key]}\nHardware input: note {KEY_NOTES[self.selected_key]}, ch 0")
+            self.action.setCurrentIndex(self.action.findData(action.kind))
+            self.key_cc.setValue(action.cc if action.cc is not None else -1)
+            self.mode.setCurrentIndex(self.mode.findData(action.mode))
+            self.media.setCurrentIndex(max(0, self.media.findData(action.media)))
+            self.command.setText(action.command)
         self.edited()
         self.error.setText("")
         self.loading = False
@@ -355,57 +432,76 @@ class Window(QMainWindow):
 
     def refresh(self):
         for index, strip in enumerate(self.strips):
-            strip.refresh(self.mappings[index], index == self.selected)
+            strip.refresh(self.config.mappings[index], self.selected_key is None and index == self.selected)
+        for key, button in self.key_buttons.items():
+            refresh_key_button(button, key, self.config.keys.get(key), key == self.selected_key)
         unsaved = self.dirty or self.draft_dirty
         self.setWindowTitle(f"SMC Bridge — Channel mapping{' *' if unsaved else ''}")
         self.save_button.setEnabled(not self.load_failed)
         self.apply_button.setEnabled(not self.load_failed)
 
+    def _draft_key(self):
+        kind = self.action.currentData()
+        if kind == "midi":
+            if self.key_cc.value() < 0:
+                raise ValueError("Choose the CC number this key sends.")
+            return KeyAction("midi", cc=self.key_cc.value(), mode=self.mode.currentData())
+        if kind == "media":
+            return KeyAction("media", media=self.media.currentData())
+        if kind == "command":
+            return KeyAction("command", command=self.command.text().strip())
+        return None
+
     def apply(self):
-        candidate = list(self.mappings)
-        if self.enabled.isChecked():
-            if self.volume.value() < 0 or self.pan.value() < 0:
-                self.error.setText("Choose both volume and pan CC numbers.")
-                return False
-            mute_cc = self.mute.value() if self.mute.value() >= 0 else None
-            solo_cc = self.solo.value() if self.solo.value() >= 0 else None
-            candidate[self.selected] = Mapping(self.name.text().strip(), self.volume.value(), self.pan.value(), mute_cc, solo_cc)
-        else:
-            candidate[self.selected] = Mapping()
+        candidate = Config(list(self.config.mappings), dict(self.config.keys))
         try:
+            if self.selected_key is not None:
+                action = self._draft_key()
+                if action is None:
+                    candidate.keys.pop(self.selected_key, None)
+                else:
+                    candidate.keys[self.selected_key] = action
+            elif self.enabled.isChecked():
+                if self.volume.value() < 0 or self.pan.value() < 0:
+                    raise ValueError("Choose both volume and pan CC numbers.")
+                candidate.mappings[self.selected] = Mapping(self.name.text().strip(), self.volume.value(), self.pan.value())
+            else:
+                candidate.mappings[self.selected] = Mapping()
             validate(candidate)
         except ValueError as error:
             self.error.setText(str(error))
             return False
-        self.dirty = self.dirty or candidate != self.mappings
-        self.mappings = candidate
+        self.dirty = self.dirty or candidate != self.config
+        self.config = candidate
         self.draft_dirty = False
         self.error.setText("")
-        self.feedback.setText("Mapping applied to this session. Save mappings to keep it after restart.")
+        self.feedback.setText("Change applied to this session. Save mappings to keep it after restart.")
         self.refresh()
         return True
 
-    def select(self, index, focus=None):
-        if index != self.selected:
-            if self.draft_dirty and not self.apply():
-                return
-            self.selected = index
-            self.populate()
-            self.refresh()
-        if focus:
-            self.focus_field(focus)
+    def _navigate(self, index, key):
+        if (index, key) == (self.selected, self.selected_key):
+            return True
+        if self.draft_dirty and not self.apply():
+            return False
+        self.selected, self.selected_key = index, key
+        self.populate()
+        self.refresh()
+        return True
 
-    def focus_field(self, field):
-        widget = {"mute": self.mute, "solo": self.solo}.get(field)
-        if widget is not None:
-            widget.setFocus(Qt.FocusReason.OtherFocusReason)
-            widget.selectAll()
+    def select(self, index):
+        self._navigate(index, None)
+
+    def select_key(self, key):
+        strip = int(key[5]) - 1 if key.startswith("strip") else self.selected
+        if self._navigate(strip, key):
+            self.action.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def save(self):
         if self.load_failed or (self.draft_dirty and not self.apply()):
             return False
         try:
-            save(self.path, self.mappings)
+            save(self.path, self.config)
         except (OSError, ValueError) as error:
             self.feedback.setText(f"Could not save mappings: {error}")
             return False
@@ -420,11 +516,11 @@ class Window(QMainWindow):
             if answer != QMessageBox.StandardButton.Discard:
                 return
         try:
-            mappings = load(self.path)
+            config = load(self.path)
         except (OSError, ValueError) as error:
             self.feedback.setText(f"Could not reload mappings: {error}")
             return
-        self.mappings = mappings
+        self.config = config
         self.load_failed = False
         self.dirty = False
         self.populate()

@@ -2,7 +2,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from smc_bridge.config import Mapping
+from smc_bridge.config import Config, KeyAction, Mapping
 
 try:
     from pyalsa import alsaseq
@@ -12,17 +12,11 @@ except ImportError:
     Transport = None
 
 
-def eight(*assigned):
+def eight(*assigned, keys=None):
     mappings = [Mapping() for _ in range(8)]
     for strip, name, volume_cc, pan_cc in assigned:
         mappings[strip] = Mapping(name, volume_cc, pan_cc)
-    return mappings
-
-
-def eight_with_buttons(strip, name, volume_cc, pan_cc, mute_cc=None, solo_cc=None):
-    mappings = [Mapping() for _ in range(8)]
-    mappings[strip] = Mapping(name, volume_cc, pan_cc, mute_cc, solo_cc)
-    return mappings
+    return Config(mappings, dict(keys or {}))
 
 
 @unittest.skipIf(Transport is None, "pyalsa is not installed")
@@ -112,7 +106,7 @@ class TransportTests(unittest.TestCase):
 
     def test_mute_press_lights_led_immediately_without_mixer_feedback(self):
         transport = Transport(
-            eight_with_buttons(0, "Desk Mic", 11, 12, mute_cc=13, solo_cc=14),
+            eight((0, "Desk Mic", 11, 12), keys={"strip1.mute": KeyAction("midi", 13), "strip1.solo": KeyAction("midi", 14)}),
             clientname="smc-bridge-test-buttons",
         )
         self.addCleanup(transport.stop)
@@ -152,33 +146,75 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(received[0].get_data()["control.value"], 0)
         self.assertEqual(received[1].get_data()["note.velocity"], 0)
 
-    def _press_transport_button(self, note):
-        source = alsaseq.Sequencer(clientname="smc-bridge-test-transport-press")
+    def _send_note(self, transport, note, velocity, event_type=None):
+        source = alsaseq.Sequencer(clientname="smc-bridge-test-key-press")
         cap_out = alsaseq.SEQ_PORT_CAP_READ | alsaseq.SEQ_PORT_CAP_SUBS_READ
         port_type = alsaseq.SEQ_PORT_TYPE_MIDI_GENERIC | alsaseq.SEQ_PORT_TYPE_APPLICATION
-        out_port = source.create_simple_port("transport-button", port_type, cap_out)
-        source.connect_ports((source.client_id, out_port), (self.transport.client_id, self.transport.smc_in))
-        event = alsaseq.SeqEvent(alsaseq.SEQ_EVENT_NOTEON)
+        out_port = source.create_simple_port("key", port_type, cap_out)
+        source.connect_ports((source.client_id, out_port), (transport.client_id, transport.smc_in))
+        event = alsaseq.SeqEvent(event_type or alsaseq.SEQ_EVENT_NOTEON)
         event.source = (source.client_id, out_port)
         event.dest = (alsaseq.SEQ_ADDRESS_SUBSCRIBERS, 0)
-        event.set_data({"note.channel": 0, "note.note": note, "note.velocity": 127})
+        event.set_data({"note.channel": 0, "note.note": note, "note.velocity": velocity})
         source.output_event(event)
         source.drain_output()
 
-    def test_transport_row_buttons_are_inert(self):
-        # Play/Pause -> system media control was built, confirmed working on
-        # hardware, then deliberately parked in media_control.py at the
-        # user's request. This locks in that the live Transport truly does
-        # nothing for any bottom-row button, including Play/Pause, and in
-        # particular never shells out.
+    def _transport_with_keys(self, keys):
+        transport = Transport(eight(keys=keys), clientname="smc-bridge-test-keys")
+        self.addCleanup(transport.stop)
+        transport.start()
+        self._connect(transport.client_id, transport.mixer_out, self.listener.client_id, self.listen_port)
+        self._connect(transport.client_id, transport.smc_out, self.listener.client_id, self.listen_port)
+        return transport
+
+    def test_unassigned_buttons_are_inert(self):
         self._connect(self.transport.client_id, self.transport.mixer_out, self.listener.client_id, self.listen_port)
         self._connect(self.transport.client_id, self.transport.smc_out, self.listener.client_id, self.listen_port)
-        with patch("subprocess.Popen") as popen:
-            for note in (94, 93, 95, 91, 92, 46, 47, 96, 97, 98, 99):
-                self._press_transport_button(note)
+        with patch("smc_bridge.transport.actions.run_media") as media, patch("smc_bridge.transport.actions.run_command") as command:
+            for note in (94, 93, 95, 91, 92, 46, 47, 96, 97, 98, 99, 0, 8, 16, 24):
+                self._send_note(self.transport, note, 127)
             received = self._wait_for_events(1, timeout=0.5)
             self.assertEqual(received, [])
-            popen.assert_not_called()
+            media.assert_not_called()
+            command.assert_not_called()
+
+    def test_media_and_command_keys_run_their_actions(self):
+        transport = self._transport_with_keys({
+            "transport.play": KeyAction("media", media="play_pause"),
+            "transport.up": KeyAction("command", command="notify-send hi"),
+        })
+        with patch("smc_bridge.transport.actions.run_media") as media, patch("smc_bridge.transport.actions.run_command") as command:
+            self._send_note(transport, 94, 127)
+            self._send_note(transport, 94, 0)
+            self._send_note(transport, 96, 127)
+            self._wait_for_events(1, timeout=0.5)
+            media.assert_called_once_with("play_pause")
+            command.assert_called_once_with("notify-send hi")
+
+    def test_momentary_key_releases_on_note_off(self):
+        transport = self._transport_with_keys({"transport.record": KeyAction("midi", 40, mode="momentary")})
+        self._send_note(transport, 95, 127)
+        received = self._wait_for_events(2)
+        self.assertEqual([e.get_data().get("control.value", e.get_data().get("note.velocity")) for e in received], [127, 127])
+        self._send_note(transport, 95, 64, alsaseq.SEQ_EVENT_NOTEOFF)
+        received = self._wait_for_events(2)
+        self.assertEqual(received[0].get_data()["control.param"], 40)
+        self.assertEqual(received[0].get_data()["control.value"], 0)
+        self.assertEqual(received[1].type, alsaseq.SEQ_EVENT_NOTEON)
+        self.assertEqual(received[1].get_data()["note.velocity"], 0)
+
+
+    def test_reload_releases_held_momentary_key_on_old_cc(self):
+        transport = self._transport_with_keys({"transport.record": KeyAction("midi", 40, mode="momentary")})
+        self._send_note(transport, 95, 127)
+        self.assertEqual(len(self._wait_for_events(2)), 2)
+        transport.update_config(eight(keys={"transport.record": KeyAction("midi", 41, mode="momentary")}))
+        received = self._wait_for_events(2)
+        self.assertEqual([e.type for e in received], [alsaseq.SEQ_EVENT_CONTROLLER, alsaseq.SEQ_EVENT_NOTEON])
+        self.assertEqual((received[0].get_data()["control.param"], received[0].get_data()["control.value"]), (40, 0))
+        self.assertEqual((received[1].get_data()["note.note"], received[1].get_data()["note.velocity"]), (95, 0))
+        self._send_note(transport, 95, 0)
+        self.assertEqual(self._wait_for_events(1, timeout=0.5), [])
 
 
 if __name__ == "__main__":
