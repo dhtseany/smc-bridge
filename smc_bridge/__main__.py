@@ -14,6 +14,7 @@ def main():
         from .daemon import run
         return run(args.config.expanduser().resolve())
     try:
+        from PySide6.QtGui import QIcon
         from PySide6.QtWidgets import QApplication
         from .gui import Window
     except ImportError as error:
@@ -21,6 +22,10 @@ def main():
     app = QApplication(sys.argv[:1])
     app.setApplicationName("SMC Bridge")
     app.setOrganizationName("smc_bridge")
+    # Matches smc-bridge.desktop, so the desktop shows its icon and name for
+    # this window (the Wayland app id).
+    app.setDesktopFileName("smc-bridge")
+    app.setWindowIcon(QIcon.fromTheme("smc-bridge"))
     window = Window(args.config.expanduser())
     window.show()
     return app.exec()

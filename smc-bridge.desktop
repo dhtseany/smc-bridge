@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=SMC Bridge
+GenericName=Control Surface Mapper
+Comment=Map the M-Vave SMC-Mixer's faders, encoders and buttons to jack_mixer, media controls and commands
+Exec=smc-bridge
+Icon=smc-bridge
+Terminal=false
+StartupNotify=true
+StartupWMClass=smc-bridge
+Categories=AudioVideo;Audio;Midi;Mixer;Qt;
+Keywords=MIDI;mixer;jack_mixer;SMC;control surface;fader;PipeWire;
