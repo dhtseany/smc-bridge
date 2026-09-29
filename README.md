@@ -20,10 +20,15 @@ with descriptive tooltips; unverified functions remain explicitly unverified.
 
 ## Install on Arch Linux
 
-Build and install with the supplied `PKGBUILD`:
+Install the `smc-bridge` package from the AUR, with your AUR helper or by
+hand:
 
 ```sh
-makepkg -si
+git clone https://aur.archlinux.org/smc-bridge.git
+```
+
+```sh
+cd smc-bridge && makepkg -si
 ```
 
 This installs the `smc-bridge` command, its `pyside6` dependency, the systemd
@@ -359,7 +364,7 @@ background process through the shared file. Both modes accept `--config`.
 
 ### Run as a systemd user service
 
-Installing the `PKGBUILD` (see "Install on Arch Linux" above) places the unit
+Installing the AUR package (see "Install on Arch Linux" above) places the unit
 at `/usr/lib/systemd/user/smc-bridge.service` automatically — skip straight to
 `systemctl --user enable --now smc-bridge.service` below.
 

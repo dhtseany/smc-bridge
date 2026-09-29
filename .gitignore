@@ -4,3 +4,6 @@ __pycache__/
 
 # Informal running dev log; not part of the published project.
 primer.md
+
+# Maintained in the AUR (smc-bridge), not here; kept locally for release updates.
+PKGBUILD
