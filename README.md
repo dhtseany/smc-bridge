@@ -156,7 +156,8 @@ installing one does nothing until you enable it.
 
 ### Turning plugins on and off
 
-Click **Plugins…** in the mapping window and tick or untick a plugin, or:
+Click **Settings…** in the mapping window, open the **Plugins** tab and tick or
+untick a plugin, or:
 
 ```sh
 smc-bridge --list-plugins

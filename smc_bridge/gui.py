@@ -1,10 +1,16 @@
 """Qt mapping surface. Visual controls edit mappings; they do not send MIDI."""
-from PySide6.QtCore import Qt, QRectF
+import importlib.metadata
+from pathlib import Path
+import platform
+import re
+
+import PySide6
+from PySide6.QtCore import Qt, QRectF, qVersion
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QSpinBox, QVBoxLayout, QWidget,
+    QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from .actions import MEDIA_ACTIONS
@@ -12,6 +18,7 @@ from .bridge import KEY_NOTES
 from .config import CCConflict, Config, KeyAction, Mapping, Route, STRIP_CONTROLS, load, save, validate
 from . import plugins
 
+HOMEPAGE = "https://github.com/dhtseany/smc-bridge"
 ACTION_CHOICES = (("", "Nothing"), ("midi", "MIDI CC to jack_mixer"), ("media", "Media command"), ("command", "Shell command"), ("plugin", "Plugin"))
 ROUTE_CHOICES = (("", "Nothing"), ("midi", "jack_mixer CC"), ("plugin", "Plugin"))
 MODE_CHOICES = (("toggle", "Toggle (press on, press off)"), ("momentary", "Momentary (on while held)"))
@@ -125,7 +132,7 @@ KEY_NOTE_TEXT = {
     "midi": "Toggle lights the key's LED while on and follows jack_mixer's feedback on the same CC, like Mute and Solo.",
     "media": "Sent to the active media player (MPRIS), like a keyboard media key.",
     "command": "Runs with /bin/sh in the background daemon, as you, once per press.",
-    "plugin": "Sent to the plugin on press and on release (so a plugin can do push-to-talk). Turn plugins on with Plugins….",
+    "plugin": "Sent to the plugin on press and on release (so a plugin can do push-to-talk). Turn plugins on in Settings.",
 }
 
 
@@ -217,16 +224,70 @@ class KeyEditor(QWidget):
         return None
 
 
-class PluginsDialog(QDialog):
+def app_version():
+    """This copy's version: from pyproject.toml when run from a source
+    checkout (so an older installed package can't mislabel it), otherwise
+    from the installed package's metadata."""
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    try:
+        match = re.search(r'^version = "([^"]+)"', pyproject.read_text(encoding="utf-8"), re.MULTILINE)
+        if match:
+            return match.group(1)
+    except OSError:
+        pass
+    try:
+        return importlib.metadata.version("smc-bridge")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def path_field(path):
+    """A path to read or copy: a line edit, so a long path scrolls instead of stretching the dialog."""
+    field = QLineEdit(str(path))
+    field.setReadOnly(True)
+    field.setCursorPosition(0)
+    return field
+
+
+class AboutPanel(QWidget):
+    def __init__(self, config_path, plugin_path):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.addWidget(label("SMC Bridge", "title"))
+        self.version = label(f"Version {app_version()}", "eyebrow")
+        layout.addWidget(self.version)
+        about = label(
+            "Maps the M-Vave SMC-Mixer's faders, encoders and buttons to jack_mixer, media controls, "
+            "shell commands and plugins. This window edits the mappings; the background bridge "
+            "(smc-bridge --headless) does the live MIDI.")
+        about.setWordWrap(True)
+        layout.addWidget(about)
+        credits = QLabel(
+            f'© Sean Snell · GPL-3.0-or-later · <a href="{HOMEPAGE}" style="color: #50d9bb;">{HOMEPAGE}</a>')
+        credits.setObjectName("muted")
+        credits.setTextFormat(Qt.TextFormat.RichText)
+        credits.setOpenExternalLinks(True)
+        credits.setWordWrap(True)
+        layout.addWidget(credits)
+        form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        form.addRow("Mappings file", path_field(config_path))
+        form.addRow("Plugin settings", path_field(plugin_path))
+        form.addRow("Runtime", label(f"Python {platform.python_version()} · Qt {qVersion()} · PySide6 {PySide6.__version__}", "muted"))
+        layout.addLayout(form)
+        layout.addStretch()
+
+
+class PluginsPanel(QWidget):
     """Turn installed plugins on and off. Each change is written at once and
     a running background bridge picks it up within a second."""
 
-    def __init__(self, path, parent=None):
-        super().__init__(parent)
+    def __init__(self, path):
+        super().__init__()
         self.path = path
-        self.setWindowTitle("Plugins")
-        self.setMinimumWidth(420)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
         self.error = label("", "error")
         self.error.setWordWrap(True)
         available = plugins.installed()
@@ -246,16 +307,15 @@ class PluginsDialog(QDialog):
             box.setEnabled(settings is not None and (entry is not None or box.isChecked()))
             box.toggled.connect(lambda checked, name=name, box=box: self.toggle(name, checked, box))
             layout.addWidget(box)
+        layout.addWidget(self.error)
+        layout.addStretch()
         note = label(
-            f"Changes take effect in the running background bridge within a second. "
-            f"Plugin settings (host, port, ...) live in {path}. "
-            f"If a plugin misbehaves, untick it here, or start the bridge with --no-plugins.", "muted")
+            "Changes take effect in the running background bridge within a second. "
+            "If a plugin misbehaves, untick it here, or start the bridge with --no-plugins. "
+            "Each plugin's own settings (host, port, ...) live in:", "muted")
         note.setWordWrap(True)
         layout.addWidget(note)
-        layout.addWidget(self.error)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        layout.addWidget(path_field(path))
 
     def toggle(self, name, enabled, box):
         try:
@@ -267,6 +327,31 @@ class PluginsDialog(QDialog):
             box.blockSignals(False)
             return
         self.error.setText("")
+
+
+class SettingsDialog(QDialog):
+    ABOUT, PLUGINS = range(2)
+    SLACK = 60
+
+    def __init__(self, config_path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        layout = QVBoxLayout(self)
+        plugin_path = plugins.settings_path(config_path)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(AboutPanel(config_path, plugin_path), "About")
+        self.tabs.addTab(PluginsPanel(plugin_path), "Plugins")
+        layout.addWidget(self.tabs, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        # Size with room to spare. Sizing a window to exactly fit wrapped
+        # text left no slack for the title bar a Wayland window draws
+        # itself, and it clipped the Close button.
+        height = layout.minimumSize().height() + self.SLACK
+        self.setMinimumSize(480, height)
+        self.resize(580, height + self.SLACK)
+
 
 STYLE = """
 QWidget { background: #171b21; color: #e4e9ee; font-family: 'DejaVu Sans'; font-size: 13px; }
@@ -289,6 +374,11 @@ QPushButton:focus { border: 2px solid #50d9bb; }
 QPushButton#primary { background: #50d9bb; color: #102c25; font-weight: bold; }
 QPushButton:disabled { color: #687582; background: #232a32; border-color: #35404c; }
 QLineEdit, QSpinBox, QComboBox { background: #10151b; border: 1px solid #465465; border-radius: 4px; padding: 8px; }
+QLineEdit:read-only { color: #9ba8b6; }
+QTabWidget::pane { border: 1px solid #35404c; border-radius: 6px; top: -1px; }
+QTabBar::tab { background: #20262e; color: #9ba8b6; border: 1px solid #35404c; border-bottom: none; border-top-left-radius: 5px; border-top-right-radius: 5px; padding: 8px 18px; margin-right: 2px; }
+QTabBar::tab:selected { background: #23332f; color: #e4e9ee; border-color: #50d9bb; }
+QTabBar::tab:hover { color: #e4e9ee; }
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus { border-color: #50d9bb; }
 QLabel#error { color: #ffaba5; }
 QScrollArea { border: none; }
@@ -472,10 +562,10 @@ class Window(QMainWindow):
         top = QHBoxLayout()
         top.addWidget(label("Your surface. Your channels.", "title"))
         top.addStretch()
-        self.plugins_button = QPushButton("Plugins…")
-        self.plugins_button.setToolTip("Turn plugins on and off")
-        self.plugins_button.clicked.connect(lambda: PluginsDialog(plugins.settings_path(self.path), self).exec())
-        top.addWidget(self.plugins_button)
+        self.settings_button = QPushButton("Settings…")
+        self.settings_button.setToolTip("Version and about, and turning plugins on and off")
+        self.settings_button.clicked.connect(lambda: SettingsDialog(self.path, self).exec())
+        top.addWidget(self.settings_button)
         self.reset_button = QPushButton("Reset all…")
         self.reset_button.setToolTip("Unset every fader, encoder and button")
         self.reset_button.clicked.connect(self.reset_all)

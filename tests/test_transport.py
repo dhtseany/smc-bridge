@@ -202,8 +202,8 @@ class TransportTests(unittest.TestCase):
             command.assert_called_once_with("notify-send hi")
 
     def test_plugin_strip_and_key_reach_the_plugin_host_not_the_mixer(self):
-        config = eight(keys={"transport.record": KeyAction("plugin", plugin="hrdctl", target="ptt")})
-        config.mappings[0] = plugin_strip("VFO A", "hrdctl", "vfo_a")
+        config = eight(keys={"transport.record": KeyAction("plugin", plugin="example", target="button")})
+        config.mappings[0] = plugin_strip("Channel A", "example", "target_a")
         host = Mock()
         transport = Transport(config, clientname="smc-bridge-test-plugins", plugins=host)
         self.addCleanup(transport.stop)
@@ -226,9 +226,9 @@ class TransportTests(unittest.TestCase):
         self._send_note(transport, 95, 127)
         self._send_note(transport, 95, 0)
         self.assertEqual(self._wait_for_events(1, timeout=0.5), [])
-        host.fader.assert_called_once_with("hrdctl", "vfo_a", 1.0)
-        host.encoder.assert_called_once_with("hrdctl", "vfo_a", -1)
-        self.assertEqual(host.key.call_args_list, [call("hrdctl", "ptt", True), call("hrdctl", "ptt", False)])
+        host.fader.assert_called_once_with("example", "target_a", 1.0)
+        host.encoder.assert_called_once_with("example", "target_a", -1)
+        self.assertEqual(host.key.call_args_list, [call("example", "button", True), call("example", "button", False)])
 
     def test_momentary_key_releases_on_note_off(self):
         transport = self._transport_with_keys({"transport.record": KeyAction("midi", 40, mode="momentary")})
