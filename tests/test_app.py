@@ -3,10 +3,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from PySide6.QtWidgets import QApplication, QCheckBox
+from PySide6.QtWidgets import QApplication, QCheckBox, QMessageBox
 from smc_bridge import plugins
-from smc_bridge.config import Config, KeyAction, Mapping, Route, load, save, validate
+from smc_bridge.config import CCConflict, Config, KeyAction, Mapping, Route, load, save, validate
 from smc_bridge.gui import Control, PluginsDialog, Window
 
 
@@ -55,6 +56,17 @@ class ConfigTests(unittest.TestCase):
         for mapping in (mixer("Mic", 128, 1), Mapping("Mic", Route("pan", cc=1)), mixer("", 1, 2), mixer("Mic", 1, 1)):
             with self.subTest(mapping=mapping), self.assertRaises(ValueError):
                 validate(config(mapping))
+
+    def test_cc_conflict_names_both_controls_and_either_can_be_unset(self):
+        clash = config(mixer("Mic", 11, 12), strip1__solo=KeyAction("midi", 12))
+        with self.assertRaises(CCConflict) as caught:
+            validate(clash)
+        self.assertEqual((caught.exception.cc, caught.exception.first, caught.exception.second), (12, "strip1.encoder", "strip1.solo"))
+        self.assertIn("already used by strip 1 encoder", str(caught.exception))
+        self.assertEqual(clash.without("strip1.solo"), config(mixer("Mic", 11, 12)))
+        self.assertEqual(clash.without("strip1.encoder").mappings[0], mixer("Mic", 11))
+        self.assertEqual(clash.without("strip1.encoder").without("strip1.fader").mappings[0], Mapping())
+        self.assertEqual(clash.keys, {"strip1.solo": KeyAction("midi", 12)})  # copies, not in place
 
     def test_pan_cc_is_optional(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -167,6 +179,12 @@ class GuiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name) / "mappings.ini"
+        # Stand in for the Replace dialog: record what was asked, answer self.replace.
+        self.replace = False
+        self.asked = []
+        replacer = patch.object(Window, "confirm_replace", lambda window, cc, other: self.asked.append((cc, other)) or self.replace)
+        replacer.start()
+        self.addCleanup(replacer.stop)
         self.window = Window(self.path)
 
     def tearDown(self):
@@ -261,8 +279,113 @@ class GuiTests(unittest.TestCase):
         self._activate(window)
         window.strips[2].key_buttons["strip3.mute"].click()
         self.assertEqual((window.selected, window.selected_key), (2, "strip3.mute"))
-        self.assertEqual(window.pages.currentIndex(), 1)
+        self.assertTrue(window.strip_section.isVisible())
+        self.assertEqual(window.editor_title.text(), "Strip 03")
+        self.assertEqual(window.button_picker.currentData(), "mute")
         self.assertTrue(window.action.hasFocus())
+
+    def test_strip_view_edits_fader_encoder_and_a_button_together(self):
+        window = self.window
+        window.show()
+        window.strips[0].key_buttons["strip1.mute"].click()
+        window.name.setText("FT-710 Rx")
+        self._route(window.fader, "midi", 19)
+        self._route(window.encoder, "plugin", plugin="hrdctl", target="vfo_a")
+        window.action.setCurrentIndex(window.action.findData("midi"))
+        window.key_cc.setValue(40)
+        # Picking another button applies the draft, strip and Mute alike.
+        window.button_picker.setCurrentIndex(window.button_picker.findData("solo"))
+        self.assertEqual(window.selected_key, "strip1.solo")
+        self.assertEqual(window.config.mappings[0], Mapping("FT-710 Rx", Route.midi(19), Route.to_plugin("hrdctl", "vfo_a")))
+        self.assertEqual(window.config.keys["strip1.mute"], KeyAction("midi", 40))
+        self.assertEqual(window.fader.cc.value(), 19)
+        # The strip's own controls keep the last button picked.
+        window.strips[1].findChildren(Control)[1].click()
+        self.assertEqual(window.selected_key, "strip2.solo")
+
+    def test_invalid_button_keeps_the_picker_on_it(self):
+        window = self.window
+        window.action.setCurrentIndex(window.action.findData("midi"))
+        window.button_picker.setCurrentIndex(window.button_picker.findData("rec"))
+        self.assertEqual(window.selected_key, "strip1.mute")
+        self.assertEqual(window.button_picker.currentData(), "mute")
+        self.assertIn("Choose the CC", window.error.text())
+
+    def test_conflicting_cc_offers_to_unset_the_other_control(self):
+        window = self.window
+        self._assign(window, 1, "PC", 11, 12)
+        window.key_buttons["strip2.mute"].click()
+        window.action.setCurrentIndex(window.action.findData("midi"))
+        window.key_cc.setValue(20)
+        self.assertTrue(window.apply())
+        window.key_buttons["strip1.mute"].click()
+        window.action.setCurrentIndex(window.action.findData("midi"))
+        window.key_cc.setValue(20)
+        self.assertFalse(window.apply())  # declined
+        self.assertEqual(self.asked, [(20, "strip2.mute")])
+        self.assertIn("already used", window.error.text())
+        self.assertEqual(window.config.keys, {"strip2.mute": KeyAction("midi", 20)})
+        self.replace = True
+        self.assertTrue(window.apply())
+        self.assertEqual(window.config.keys, {"strip1.mute": KeyAction("midi", 20)})
+        self.assertFalse(window.key_buttons["strip2.mute"].property("mapped"))
+        self.assertIn("Unset Strip 02 · Mute", window.feedback.text())
+
+    def test_replacing_a_strips_only_route_clears_the_strip(self):
+        window = self.window
+        window.select(1)
+        window.name.setText("PC")
+        self._route(window.fader, "midi", 11)
+        self.assertTrue(window.apply())
+        self.replace = True
+        window.select(0)
+        window.name.setText("Mic")
+        self._route(window.encoder, "midi", 11)
+        self.assertTrue(window.apply())
+        self.assertEqual(self.asked, [(11, "strip2.fader")])
+        self.assertEqual(window.config.mappings[1], Mapping())
+        self.assertEqual(window.config.mappings[0], Mapping("Mic", None, Route.midi(11)))
+
+    def test_clash_within_the_draft_is_not_offered(self):
+        window = self.window
+        self.replace = True
+        window.name.setText("Mic")
+        self._route(window.fader, "midi", 11)
+        self._route(window.encoder, "midi", 11)
+        self.assertFalse(window.apply())
+        self.assertEqual(self.asked, [])
+        self.assertIn("already used", window.error.text())
+
+    def test_reset_all_unsets_everything_until_saved(self):
+        window = self.window
+        self._assign(window, 0, "Desk Mic", 11, 12)
+        window.key_buttons["transport.play"].click()
+        window.action.setCurrentIndex(window.action.findData("media"))
+        self.assertTrue(window.save())
+        with patch("smc_bridge.gui.QMessageBox.question", return_value=QMessageBox.StandardButton.Cancel):
+            window.reset_all()
+        self.assertEqual(window.config.mappings[0], mixer("Desk Mic", 11, 12))
+        with patch("smc_bridge.gui.QMessageBox.question", return_value=QMessageBox.StandardButton.Reset):
+            window.reset_all()
+        self.assertEqual(window.config, Config())
+        self.assertTrue(window.dirty)
+        window.select(0)
+        self.assertEqual(window.name.text(), "")
+        self.assertEqual(window.fader.kind.currentData(), "")
+        self.assertEqual(load(self.path).mappings[0], mixer("Desk Mic", 11, 12))  # not written yet
+        self.assertTrue(window.save())
+        self.assertEqual(load(self.path), Config())
+
+    def test_transport_key_shows_only_the_key(self):
+        window = self.window
+        window.show()
+        window.key_buttons["transport.play"].click()
+        self.assertFalse(window.strip_section.isVisible())
+        self.assertFalse(window.key_form.isRowVisible(window.button_picker))
+        self.assertEqual(window.editor_title.text(), "Play")
+        window.strips[4].button.click()
+        self.assertTrue(window.strip_section.isVisible())
+        self.assertEqual(window.selected_key, "strip5.mute")
 
     def test_every_key_can_be_given_each_kind_of_action_and_saved(self):
         window = self.window
@@ -343,7 +466,7 @@ class GuiTests(unittest.TestCase):
         self.assertIn("already used", window.error.text())
         window.key_cc.setValue(13)
         window.strips[1].button.click()
-        self.assertEqual((window.selected, window.selected_key), (1, None))
+        self.assertEqual((window.selected, window.selected_key), (1, "strip2.mute"))
         self.assertEqual(window.config.keys["strip1.mute"], KeyAction("midi", 13))
         window.key_buttons["strip1.mute"].click()
         window.action.setCurrentIndex(window.action.findData(""))

@@ -72,7 +72,7 @@ Every fader, encoder and button is programmed on its own. A strip's fader
 can drive a jack_mixer volume while its encoder tunes a radio through a
 plugin, or either can be left doing nothing.
 
-1. Click a strip's fader, encoder, or channel label.
+1. Click a strip's fader, encoder, channel label or one of its buttons.
 2. Enter a channel name (a label for the strip). Then, separately for the
    **Fader** and the **Encoder**, choose what it **Sends to**:
    - *Nothing*: the control is ignored.
@@ -92,6 +92,11 @@ buttons on each strip and the eleven transport-row buttons (43 in all; BT
 and Shift send no MIDI). Click a button, choose what happens **When
 pressed**, and Apply. Buttons with an action are highlighted.
 
+A strip's M, S, R and □ buttons open in the same panel as that strip's
+name, fader and encoder, with a **Button** picker to move between the four.
+They are still programmed independently; the panel just keeps a strip's
+settings together. Transport buttons open on their own.
+
 - **MIDI CC to jack_mixer**: sends a CC, as Mute and Solo do. *Toggle*
   flips on/off with each press (127/0), lights the button's LED while on,
   and follows jack_mixer's feedback on the same CC. *Momentary* sends 127
@@ -110,7 +115,10 @@ pressed**, and Apply. Buttons with an action are highlighted.
   write to.
 
 CC numbers must be 0–127 and unique across every fader, encoder and key
-sent to jack_mixer.
+sent to jack_mixer. If you pick a CC another control already uses, Apply
+offers to replace it: the other control is unset (a strip left with nothing
+assigned is cleared, name included) and yours takes the CC. Cancel leaves
+both as they were.
 The MIDI channel policy will be established with the transport implementation;
 this preview has a single shared CC namespace. Names are descriptive labels;
 jack_mixer channel discovery/configuration is not implemented.
@@ -118,6 +126,12 @@ jack_mixer channel discovery/configuration is not implemented.
 **Reload saved** restores the file, prompting before discarding edits. Closing
 with unsaved edits offers Save, Discard, or Cancel. An invalid startup file is
 reported and protected against overwriting; correct it and click Reload saved.
+
+**Reset all…** unsets every fader, encoder and button and clears the channel
+names, after asking. It changes only the editor: click **Save mappings** to
+write the empty configuration (the background bridge then leaves every
+control inert), or **Reload saved** to undo. It also replaces a file that
+failed to load, once saved. `plugins.ini` is not touched.
 
 The human-readable INI file defaults to:
 

@@ -4,12 +4,12 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QSpinBox, QVBoxLayout, QWidget,
 )
 
 from .actions import MEDIA_ACTIONS
 from .bridge import KEY_NOTES
-from .config import Config, KeyAction, Mapping, Route, load, save, validate
+from .config import CCConflict, Config, KeyAction, Mapping, Route, STRIP_CONTROLS, load, save, validate
 from . import plugins
 
 ACTION_CHOICES = (("", "Nothing"), ("midi", "MIDI CC to jack_mixer"), ("media", "Media command"), ("command", "Shell command"), ("plugin", "Plugin"))
@@ -39,6 +39,14 @@ def describe(action):
     if action.kind == "plugin":
         return f"plugin {action.plugin} → {action.target}"
     return f"runs: {action.command}"
+
+
+def control_name(control):
+    """'Strip 02 · Fader' for a strip's fader or encoder id, else the key's name."""
+    strip, _, part = control.partition(".")
+    if part in STRIP_CONTROLS:
+        return f"Strip {int(strip[len('strip'):]):02} · {part.capitalize()}"
+    return KEY_NAMES[control]
 
 
 def describe_route(route, short=False):
@@ -339,7 +347,10 @@ class Window(QMainWindow):
         super().__init__()
         self.path = path
         self.selected = 0
-        self.selected_key = None
+        # Every view edits one key: a strip shows its fader, encoder and one
+        # of its four buttons together; a transport key shows just itself.
+        self.selected_key = "strip1.mute"
+        self.strip_key_kind = "mute"
         self.loading = False
         self.draft_dirty = False
         self.dirty = False
@@ -367,6 +378,10 @@ class Window(QMainWindow):
         self.plugins_button.setToolTip("Turn plugins on and off")
         self.plugins_button.clicked.connect(lambda: PluginsDialog(plugins.settings_path(self.path), self).exec())
         top.addWidget(self.plugins_button)
+        self.reset_button = QPushButton("Reset all…")
+        self.reset_button.setToolTip("Unset every fader, encoder and button")
+        self.reset_button.clicked.connect(self.reset_all)
+        top.addWidget(self.reset_button)
         self.reload_button = QPushButton("Reload saved")
         self.reload_button.clicked.connect(self.reload)
         top.addWidget(self.reload_button)
@@ -429,17 +444,17 @@ class Window(QMainWindow):
         panel = QVBoxLayout(editor)
         panel.setContentsMargins(16, 0, 0, 0)
         # Fader and encoder each have their own fields, which outgrow short windows.
-        editor_scroll = QScrollArea()
-        editor_scroll.setWidgetResizable(True)
-        editor_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        editor_scroll.setFixedWidth(270 + editor_scroll.verticalScrollBar().sizeHint().width())
-        editor_scroll.setWidget(editor)
+        self.editor_scroll = QScrollArea()
+        self.editor_scroll.setWidgetResizable(True)
+        self.editor_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.editor_scroll.setFixedWidth(270 + self.editor_scroll.verticalScrollBar().sizeHint().width())
+        self.editor_scroll.setWidget(editor)
         # The error and Apply stay in view below the scrolling fields.
         editor_column = QWidget()
-        editor_column.setFixedWidth(editor_scroll.width())
+        editor_column.setFixedWidth(self.editor_scroll.width())
         column = QVBoxLayout(editor_column)
         column.setContentsMargins(0, 0, 0, 0)
-        column.addWidget(editor_scroll, 1)
+        column.addWidget(self.editor_scroll, 1)
         pinned = QVBoxLayout()
         pinned.setContentsMargins(16, 0, 0, 0)
         column.addLayout(pinned)
@@ -448,9 +463,8 @@ class Window(QMainWindow):
         self.input_hint = label("", "muted")
         self.input_hint.setWordWrap(True)
         panel.addWidget(self.input_hint)
-        self.pages = QStackedWidget()
-        strip_page = QWidget()
-        strip_layout = QVBoxLayout(strip_page)
+        self.strip_section = QWidget()
+        strip_layout = QVBoxLayout(self.strip_section)
         strip_layout.setContentsMargins(0, 0, 0, 0)
         self.name = QLineEdit()
         self.name.setPlaceholderText("e.g. Desk Mic")
@@ -471,13 +485,17 @@ class Window(QMainWindow):
             "0-100% level and the encoder steps; the plugin decides what a target means.", "muted")
         self.strip_note.setWordWrap(True)
         strip_layout.addWidget(self.strip_note)
-        strip_layout.addStretch()
-        self.pages.addWidget(strip_page)
+        panel.addWidget(self.strip_section)
 
-        key_page = QWidget()
-        self.key_form = QFormLayout(key_page)
-        self.key_form.setContentsMargins(0, 0, 0, 0)
+        key_section = QWidget()
+        self.key_form = QFormLayout(key_section)
+        self.key_form.setContentsMargins(0, 8, 0, 0)
         self.key_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        self.button_picker = QComboBox()
+        self.button_picker.setAccessibleName("Strip button to edit")
+        for kind, text, name in STRIP_KEY_BUTTONS:
+            self.button_picker.addItem(f"{text}  ·  {name}", kind)
+        self.key_hint = label("", "muted")
         self.action = QComboBox()
         for value, text in ACTION_CHOICES:
             self.action.addItem(text, value)
@@ -492,6 +510,9 @@ class Window(QMainWindow):
         self.key_plugin = plugin_combo()
         self.key_target = QLineEdit()
         self.key_target.setPlaceholderText("e.g. ptt")
+        self.key_form.addRow(label("BUTTON", "eyebrow"))
+        self.key_form.addRow("Button", self.button_picker)
+        self.key_form.addRow(self.key_hint)
         self.key_form.addRow("When pressed", self.action)
         self.key_form.addRow("CC sent to jack_mixer", self.key_cc)
         self.key_form.addRow("Behavior", self.mode)
@@ -502,8 +523,7 @@ class Window(QMainWindow):
         self.key_note = label("", "muted")
         self.key_note.setWordWrap(True)
         self.key_form.addRow(self.key_note)
-        self.pages.addWidget(key_page)
-        panel.addWidget(self.pages)
+        panel.addWidget(key_section)
         panel.addStretch()
         self.error = label("", "error")
         self.error.setWordWrap(True)
@@ -531,6 +551,7 @@ class Window(QMainWindow):
         self.key_cc.valueChanged.connect(self.edited)
         for line in (self.command, self.key_target):
             line.textChanged.connect(self.edited)
+        self.button_picker.currentIndexChanged.connect(self.pick_button)
         self.populate()
         self.refresh()
         if initial_error:
@@ -559,11 +580,17 @@ class Window(QMainWindow):
             self.error.setText("")
             self.refresh()
 
+    @property
+    def strip_view(self):
+        return self.selected_key.startswith("strip")
+
     def populate(self):
         self.loading = True
-        if self.selected_key is None:
+        strip_view = self.strip_view
+        self.strip_section.setVisible(strip_view)
+        self.key_form.setRowVisible(self.button_picker, strip_view)
+        if strip_view:
             mapping = self.config.mappings[self.selected]
-            self.pages.setCurrentIndex(0)
             self.editor_title.setText(f"Strip {self.selected + 1:02}")
             self.input_hint.setText(
                 f"Fader input: pitch bend ch {self.selected}\n"
@@ -573,18 +600,20 @@ class Window(QMainWindow):
             self.name.setText(mapping.name)
             self.fader.set_route(mapping.fader)
             self.encoder.set_route(mapping.encoder)
+            self.button_picker.setCurrentIndex(self.button_picker.findData(self.selected_key.split(".")[1]))
+            self.key_hint.setText(f"Input: note {KEY_NOTES[self.selected_key]}, ch 0")
         else:
-            action = self.config.keys.get(self.selected_key) or KeyAction("")
-            self.pages.setCurrentIndex(1)
             self.editor_title.setText(KEY_NAMES[self.selected_key].split(" · ")[1])
-            self.input_hint.setText(f"{KEY_NAMES[self.selected_key]}\nHardware input: note {KEY_NOTES[self.selected_key]}, ch 0")
-            self.action.setCurrentIndex(self.action.findData(action.kind))
-            self.key_cc.setValue(action.cc if action.cc is not None else -1)
-            self.mode.setCurrentIndex(self.mode.findData(action.mode))
-            self.media.setCurrentIndex(max(0, self.media.findData(action.media)))
-            self.command.setText(action.command)
-            self.key_plugin.setCurrentText(action.plugin)
-            self.key_target.setText(action.target)
+            self.input_hint.setText(KEY_NAMES[self.selected_key])
+            self.key_hint.setText(f"Input: note {KEY_NOTES[self.selected_key]}, ch 0")
+        action = self.config.keys.get(self.selected_key) or KeyAction("")
+        self.action.setCurrentIndex(self.action.findData(action.kind))
+        self.key_cc.setValue(action.cc if action.cc is not None else -1)
+        self.mode.setCurrentIndex(self.mode.findData(action.mode))
+        self.media.setCurrentIndex(max(0, self.media.findData(action.media)))
+        self.command.setText(action.command)
+        self.key_plugin.setCurrentText(action.plugin)
+        self.key_target.setText(action.target)
         self.edited()
         self.error.setText("")
         self.loading = False
@@ -592,7 +621,7 @@ class Window(QMainWindow):
 
     def refresh(self):
         for index, strip in enumerate(self.strips):
-            strip.refresh(self.config.mappings[index], self.selected_key is None and index == self.selected)
+            strip.refresh(self.config.mappings[index], self.strip_view and index == self.selected)
         for key, button in self.key_buttons.items():
             refresh_key_button(button, key, self.config.keys.get(key), key == self.selected_key)
         unsaved = self.dirty or self.draft_dirty
@@ -614,19 +643,44 @@ class Window(QMainWindow):
             return KeyAction("plugin", plugin=self.key_plugin.currentText().strip(), target=self.key_target.text().strip())
         return None
 
+    def _draft_controls(self):
+        """Ids of the controls the editor is showing, as Config.without() takes them."""
+        if not self.strip_view:
+            return {self.selected_key}
+        return {f"strip{self.selected + 1}.{control}" for control in STRIP_CONTROLS} | {self.selected_key}
+
+    def confirm_replace(self, cc, other):
+        answer = QMessageBox.question(
+            self, "CC already in use",
+            f"CC {cc} is already used by {control_name(other)}.\n\nReplace it? {control_name(other)} will be unset.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
     def apply(self):
         candidate = Config(list(self.config.mappings), dict(self.config.keys))
+        replaced = []
         try:
-            if self.selected_key is not None:
-                action = self._draft_key()
-                if action is None:
-                    candidate.keys.pop(self.selected_key, None)
-                else:
-                    candidate.keys[self.selected_key] = action
-            else:
+            if self.strip_view:
                 mapping = Mapping(self.name.text().strip(), self.fader.route(), self.encoder.route())
                 candidate.mappings[self.selected] = mapping if mapping.used else Mapping()
-            validate(candidate)
+            action = self._draft_key()
+            if action is None:
+                candidate.keys.pop(self.selected_key, None)
+            else:
+                candidate.keys[self.selected_key] = action
+            while True:
+                try:
+                    validate(candidate)
+                    break
+                except CCConflict as conflict:
+                    # Offer to take the CC from a control outside this draft;
+                    # a clash within the draft is the user's to fix.
+                    others = [c for c in (conflict.first, conflict.second) if c not in self._draft_controls()]
+                    if len(others) != 1 or not self.confirm_replace(conflict.cc, others[0]):
+                        raise
+                    candidate = candidate.without(others[0])
+                    replaced.append(control_name(others[0]))
         except ValueError as error:
             self.error.setText(str(error))
             return False
@@ -634,9 +688,29 @@ class Window(QMainWindow):
         self.config = candidate
         self.draft_dirty = False
         self.error.setText("")
-        self.feedback.setText("Change applied to this session. Save mappings to keep it after restart.")
+        self.feedback.setText(
+            (f"Unset {', '.join(replaced)}. " if replaced else "")
+            + "Change applied to this session. Save mappings to keep it after restart."
+        )
         self.refresh()
         return True
+
+    def reset_all(self):
+        answer = QMessageBox.question(
+            self, "Reset all mappings?",
+            "Unset every fader, encoder and button, and clear all channel names?\n\n"
+            "Nothing is written until you click Save mappings; Reload saved undoes this.",
+            QMessageBox.StandardButton.Reset | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Reset:
+            return
+        # A deliberate reset may replace a file that failed to load.
+        self.dirty = self.dirty or self.load_failed or self.config != Config()
+        self.config = Config()
+        self.load_failed = False
+        self.populate()
+        self.refresh()
+        self.feedback.setText("Everything is unset. Save mappings to keep it, or Reload saved to undo.")
 
     def _navigate(self, index, key):
         if (index, key) == (self.selected, self.selected_key):
@@ -648,17 +722,40 @@ class Window(QMainWindow):
         self.refresh()
         return True
 
+    def _strip_key(self, index):
+        return f"strip{index + 1}.{self.strip_key_kind}"
+
     def select(self, index):
-        self._navigate(index, None)
+        return self._navigate(index, self._strip_key(index))
 
     def select_control(self, index, control):
-        if self._navigate(index, None):
-            getattr(self, control).kind.setFocus(Qt.FocusReason.OtherFocusReason)
+        if self.select(index):
+            self._focus(getattr(self, control).kind)
 
     def select_key(self, key):
         strip = int(key[5]) - 1 if key.startswith("strip") else self.selected
         if self._navigate(strip, key):
-            self.action.setFocus(Qt.FocusReason.OtherFocusReason)
+            if key.startswith("strip"):
+                self.strip_key_kind = key.split(".")[1]
+            self._focus(self.action)
+
+    def _focus(self, widget):
+        """Focus `widget` and scroll the editor to it; a strip's button sits below its fader and encoder."""
+        widget.setFocus(Qt.FocusReason.OtherFocusReason)
+        QApplication.processEvents()
+        self.editor_scroll.ensureWidgetVisible(widget, 0, 80)
+
+    def pick_button(self, *_):
+        """The strip view's button picker: edit another of this strip's buttons."""
+        if self.loading:
+            return
+        key = f"strip{self.selected + 1}.{self.button_picker.currentData()}"
+        if self._navigate(self.selected, key):
+            self.strip_key_kind = key.split(".")[1]
+        else:
+            self.loading = True
+            self.button_picker.setCurrentIndex(self.button_picker.findData(self.selected_key.split(".")[1]))
+            self.loading = False
 
     def save(self):
         if self.load_failed or (self.draft_dirty and not self.apply()):

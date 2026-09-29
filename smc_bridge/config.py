@@ -1,6 +1,6 @@
 """Persistent mappings and key actions, independent of the GUI and the MIDI transport."""
 from configparser import ConfigParser, Error as ConfigError
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import os
 from pathlib import Path
 import re
@@ -77,6 +77,34 @@ class Config:
     mappings: list = field(default_factory=lambda: [Mapping() for _ in range(8)])
     keys: dict = field(default_factory=dict)
 
+    def without(self, control):
+        """A copy with `control` unset: a key id ("strip2.mute") or a strip's
+        fader or encoder ("strip2.fader"). A strip left with nothing routed
+        is cleared entirely, name included."""
+        config = Config(list(self.mappings), dict(self.keys))
+        strip, _, part = control.partition(".")
+        if part in STRIP_CONTROLS:
+            index = int(strip[len("strip"):]) - 1
+            mapping = replace(config.mappings[index], **{part: None})
+            config.mappings[index] = mapping if mapping.used else Mapping()
+        else:
+            config.keys.pop(control, None)
+        return config
+
+
+class CCConflict(ValueError):
+    """Two controls send the same jack_mixer CC. `first` and `second` are
+    control ids as Config.without() takes them, in the order they were found."""
+
+    def __init__(self, cc, first, second):
+        super().__init__(f"CC {cc} is already used by {_describe(first)}. Choose a unique CC for each control.")
+        self.cc, self.first, self.second = cc, first, second
+
+
+def _describe(control):
+    strip, _, part = control.partition(".")
+    return f"{strip[:5]} {strip[5:]} {part}" if part in STRIP_CONTROLS else f"key {control}"
+
 
 def default_path():
     return Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "smc_bridge" / "mappings.ini"
@@ -99,9 +127,10 @@ def validate(config):
 
     def claim(cc, owner):
         if type(cc) is not int or not 0 <= cc <= 127:
-            raise ValueError(f"{owner[0].upper()}{owner[1:]}: CC must be between 0 and 127.")
+            description = _describe(owner)
+            raise ValueError(f"{description[0].upper()}{description[1:]}: CC must be between 0 and 127.")
         if cc in used:
-            raise ValueError(f"CC {cc} is already used by {used[cc]}. Choose a unique CC for each control.")
+            raise CCConflict(cc, used[cc], owner)
         used[cc] = owner
 
     for strip, mapping in enumerate(mappings, 1):
@@ -114,7 +143,7 @@ def validate(config):
             if route is None:
                 continue
             if route.kind == "midi":
-                claim(route.cc, f"strip {strip} {control}")
+                claim(route.cc, f"strip{strip}.{control}")
             elif route.kind == "plugin":
                 _check_plugin_route(f"Strip {strip} {control}", route.plugin, route.target)
             else:
@@ -125,7 +154,7 @@ def validate(config):
         if action.kind == "midi":
             if action.mode not in MIDI_MODES:
                 raise ValueError(f"Key {key}: mode must be toggle or momentary.")
-            claim(action.cc, f"key {key}")
+            claim(action.cc, key)
         elif action.kind == "media":
             if action.media not in MEDIA_ACTIONS:
                 raise ValueError(f"Key {key}: choose a media command.")
