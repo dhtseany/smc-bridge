@@ -72,7 +72,7 @@ class BridgeEncoderTests(unittest.TestCase):
         self.assertEqual((cc, value), (12, PAN_CENTER + 1))
 
     def test_strip_without_pan_cc_ignores_encoder_but_keeps_fader(self):
-        bridge = Bridge(eight((0, "FT-710 Rx", 19, None)))
+        bridge = Bridge(eight((0, "Mixed strip", 19, None)))
         self.assertIsNone(bridge.on_encoder(16, 1))
         self.assertEqual(bridge.on_fader(0, 8191), (19, 127))
         self.assertIsNone(bridge.on_mixer_pan(12, 20))

@@ -5,10 +5,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtWidgets import QApplication, QCheckBox, QMessageBox
+from PySide6.QtWidgets import QApplication, QCheckBox, QDialogButtonBox, QMessageBox
 from smc_bridge import plugins
 from smc_bridge.config import CCConflict, Config, KeyAction, Mapping, Route, load, save, validate
-from smc_bridge.gui import Control, PluginsDialog, Window
+from smc_bridge.gui import Control, PluginsPanel, SettingsDialog, Window, app_version
 
 
 def mixer(name, volume_cc, pan_cc=None):
@@ -71,7 +71,7 @@ class ConfigTests(unittest.TestCase):
     def test_pan_cc_is_optional(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mappings.ini"
-            volume_only = config(mixer("FT-710 Rx", 19))
+            volume_only = config(mixer("Mixed strip", 19))
             save(path, volume_only)
             loaded = load(path)
             self.assertEqual(loaded, volume_only)
@@ -82,11 +82,11 @@ class ConfigTests(unittest.TestCase):
             path = Path(directory) / "mappings.ini"
             path.write_text(
                 "[app]\nformat_version = 3\n\n[strip1]\nname = Mic\nvolume_cc = 11\npan_cc = 12\n\n"
-                "[strip2]\nname = VFO A\nvolume_cc =\npan_cc =\nplugin = hrdctl\ntarget = vfo_a\n"
+                "[strip2]\nname = Channel A\nvolume_cc =\npan_cc =\nplugin = example\ntarget = target_a\n"
                 + "".join(f"\n[strip{i}]\nname =\nvolume_cc =\npan_cc =\n" for i in range(3, 9))
             )
             path.chmod(0o600)
-            self.assertEqual(load(path), config(mixer("Mic", 11, 12), plugin_strip("VFO A", "hrdctl", "vfo_a")))
+            self.assertEqual(load(path), config(mixer("Mic", 11, 12), plugin_strip("Channel A", "example", "target_a")))
 
     def test_every_key_action_kind_roundtrips(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -145,8 +145,8 @@ class ConfigTests(unittest.TestCase):
 
     def test_plugin_routes_require_a_private_file(self):
         for routed in (
-            config(plugin_strip("VFO A", "hrdctl", "vfo_a")),
-            config(transport__record=KeyAction("plugin", plugin="hrdctl", target="ptt")),
+            config(plugin_strip("Channel A", "example", "target_a")),
+            config(transport__record=KeyAction("plugin", plugin="example", target="button")),
         ):
             with self.subTest(config=routed), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "mappings.ini"
@@ -177,6 +177,10 @@ class GuiTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        # Plugins installed on this machine must not change what the GUI shows.
+        installed = patch("smc_bridge.plugins.installed", return_value={})
+        installed.start()
+        self.addCleanup(installed.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name) / "mappings.ini"
         # Stand in for the Replace dialog: record what was asked, answer self.replace.
@@ -238,21 +242,21 @@ class GuiTests(unittest.TestCase):
     def test_fader_and_encoder_are_routed_independently(self):
         window = self.window
         window.show()
-        window.name.setText("FT-710 Rx")
+        window.name.setText("Mixed strip")
         self._route(window.fader, "midi", 19)
-        self._route(window.encoder, "plugin", plugin="hrdctl", target="vfo_a")
+        self._route(window.encoder, "plugin", plugin="example", target="target_a")
         self.assertTrue(window.fader.form.isRowVisible(window.fader.cc))
         self.assertFalse(window.fader.form.isRowVisible(window.fader.target))
         self.assertFalse(window.encoder.form.isRowVisible(window.encoder.cc))
         self.assertTrue(window.encoder.form.isRowVisible(window.encoder.target))
         self.assertTrue(window.apply())
-        self.assertEqual(window.strips[0].mapping_label.text(), "CC 19 · hrdctl")
+        self.assertEqual(window.strips[0].mapping_label.text(), "CC 19 · example")
         window.select(1)
         window.name.setText("Spare")
         self._route(window.encoder, "midi", 20)
         window.save_button.click()
         saved = load(self.path)
-        self.assertEqual(saved.mappings[0], Mapping("FT-710 Rx", Route.midi(19), Route.to_plugin("hrdctl", "vfo_a")))
+        self.assertEqual(saved.mappings[0], Mapping("Mixed strip", Route.midi(19), Route.to_plugin("example", "target_a")))
         self.assertEqual(saved.mappings[1], Mapping("Spare", None, Route.midi(20)))
         self.assertEqual(window.strips[1].mapping_label.text(), "— · CC 20")
 
@@ -292,9 +296,9 @@ class GuiTests(unittest.TestCase):
         window = self.window
         self._activate(window)
         window.strips[0].key_buttons["strip1.mute"].click()
-        window.name.setText("FT-710 Rx")
+        window.name.setText("Mixed strip")
         self._route(window.fader, "midi", 19)
-        self._route(window.encoder, "plugin", plugin="hrdctl", target="vfo_a")
+        self._route(window.encoder, "plugin", plugin="example", target="target_a")
         window.key_editor.action.setCurrentIndex(window.key_editor.action.findData("midi"))
         window.key_editor.cc.setValue(40)
         # Another button on the same strip is in the same panel: nothing is applied yet.
@@ -305,7 +309,7 @@ class GuiTests(unittest.TestCase):
         window.key_editor.action.setCurrentIndex(window.key_editor.action.findData("media"))
         window.strips[1].button.click()
         self.assertEqual((window.selected, window.selected_key), (1, None))
-        self.assertEqual(window.config.mappings[0], Mapping("FT-710 Rx", Route.midi(19), Route.to_plugin("hrdctl", "vfo_a")))
+        self.assertEqual(window.config.mappings[0], Mapping("Mixed strip", Route.midi(19), Route.to_plugin("example", "target_a")))
         self.assertEqual(window.config.keys, {"strip1.mute": KeyAction("midi", 40), "strip1.solo": KeyAction("media", media="play_pause")})
         self.assertIsNone(window.key_editor)
 
@@ -429,33 +433,52 @@ class GuiTests(unittest.TestCase):
     def test_strip_and_key_can_be_sent_to_a_plugin(self):
         window = self.window
         window.select(7)
-        window.name.setText("VFO A")
-        self._route(window.fader, "plugin", plugin="hrdctl", target="vfo_a")
-        self._route(window.encoder, "plugin", plugin="hrdctl", target="vfo_a")
+        window.name.setText("Channel A")
+        self._route(window.fader, "plugin", plugin="example", target="target_a")
+        self._route(window.encoder, "plugin", plugin="example", target="target_a")
         window.key_buttons["transport.record"].click()
         window.key_editor.action.setCurrentIndex(window.key_editor.action.findData("plugin"))
-        window.key_editor.plugin.setCurrentText("hrdctl")
-        window.key_editor.target.setText("ptt")
+        window.key_editor.plugin.setCurrentText("example")
+        window.key_editor.target.setText("button")
         self.assertTrue(window.save())
         saved = load(self.path)
-        self.assertEqual(saved.mappings[7], plugin_strip("VFO A", "hrdctl", "vfo_a"))
-        self.assertEqual(saved.keys, {"transport.record": KeyAction("plugin", plugin="hrdctl", target="ptt")})
-        self.assertEqual(window.strips[7].mapping_label.text(), "hrdctl · hrdctl")
+        self.assertEqual(saved.mappings[7], plugin_strip("Channel A", "example", "target_a"))
+        self.assertEqual(saved.keys, {"transport.record": KeyAction("plugin", plugin="example", target="button")})
+        self.assertEqual(window.strips[7].mapping_label.text(), "example · example")
         window.select(7)
         self.assertEqual(window.encoder.kind.currentData(), "plugin")
-        self.assertEqual(window.fader.plugin.currentText(), "hrdctl")
+        self.assertEqual(window.fader.plugin.currentText(), "example")
 
-    def test_plugins_dialog_toggles_plugins_ini(self):
+    def test_plugins_panel_toggles_plugins_ini(self):
         settings = Path(self.temp.name) / "plugins.ini"
-        plugins.set_enabled(settings, "hrdctl", True)
-        dialog = PluginsDialog(settings)
-        box = next(box for box in dialog.findChildren(QCheckBox) if box.text().startswith("hrdctl"))
+        plugins.set_enabled(settings, "example", True)
+        panel = PluginsPanel(settings)
+        box = next(box for box in panel.findChildren(QCheckBox) if box.text().startswith("example"))
         self.assertTrue(box.isChecked())
         box.setChecked(False)
-        self.assertEqual(plugins.load_settings(settings), {"hrdctl": plugins.PluginSettings(False, {})})
+        self.assertEqual(plugins.load_settings(settings), {"example": plugins.PluginSettings(False, {})})
         # Not installed, so once off it can't be turned back on from here.
+        self.assertFalse(PluginsPanel(settings).findChildren(QCheckBox)[0].isEnabled())
+
+    def test_settings_dialog_has_about_then_plugins_and_room_for_close(self):
+        dialog = SettingsDialog(self.path, self.window)
+        self.assertEqual([dialog.tabs.tabText(i) for i in range(dialog.tabs.count())], ["About", "Plugins"])
+        self.assertEqual(dialog.tabs.currentIndex(), SettingsDialog.ABOUT)
+        about = dialog.tabs.widget(SettingsDialog.ABOUT)
+        self.assertEqual(about.version.text(), f"Version {app_version()}")
+        self.assertIsInstance(dialog.tabs.widget(SettingsDialog.PLUGINS), PluginsPanel)
+        dialog.show()
+        self.app.processEvents()
+        close = dialog.findChild(QDialogButtonBox).buttons()[0]
+        self.assertGreaterEqual(close.height(), close.sizeHint().height())
+        # Content needs less than the minimum size, leaving slack for a
+        # client-side title bar.
+        self.assertLess(dialog.layout().minimumSize().height(), dialog.minimumHeight())
         dialog.close()
-        self.assertFalse(PluginsDialog(settings).findChildren(QCheckBox)[0].isEnabled())
+
+    def test_version_comes_from_this_source_tree(self):
+        text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+        self.assertIn(f'version = "{app_version()}"', text)
 
     def test_only_the_chosen_actions_fields_are_shown(self):
         window = self.window
