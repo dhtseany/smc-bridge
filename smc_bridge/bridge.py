@@ -2,8 +2,8 @@
 
 Physical layout is fixed by the hardware (see primer.md's SMC MIDI PROTOCOL
 FINDINGS): fader N is Pitch Bend channel N-1, encoder N is CC (16 + N-1) on
-channel 0, both N in 1..8. Each strip's jack_mixer-side volume_cc/pan_cc is
-whatever the user configured for it. Feedback direction is intentionally
+channel 0, both N in 1..8. Each fader and each encoder is routed on its own,
+to whichever jack_mixer CC (or plugin target) the user configured for it. Feedback direction is intentionally
 naive: the physical fader is always treated as correct, so every fader move
 is forwarded unconditionally; the hardware's own LED shows any resulting
 mismatch until the user re-touches the fader (see primer.md, "OPEN DESIGN
@@ -115,7 +115,7 @@ class Bridge:
         releases = []
         mappings = list(mappings)
         for strip, (old, new) in enumerate(zip(self.mappings, mappings)):
-            if (old.assigned, old.pan_cc) != (new.assigned, new.pan_cc):
+            if old.cc("encoder") != new.cc("encoder"):
                 self.pan_state[strip] = PAN_CENTER
         self.mappings = mappings
         if keys is not None:
@@ -129,11 +129,8 @@ class Bridge:
             self.keys = keys
         return releases
 
-    def _volume_ccs(self):
-        return {m.volume_cc: i for i, m in enumerate(self.mappings) if m.assigned}
-
-    def _pan_ccs(self):
-        return {m.pan_cc: i for i, m in enumerate(self.mappings) if m.assigned}
+    def _ccs(self, control):
+        return {m.cc(control): i for i, m in enumerate(self.mappings) if m.cc(control) is not None}
 
     def _toggle_key_ccs(self):
         return {a.cc: key for key, a in self.keys.items() if a.kind == "midi" and a.mode == "toggle"}
@@ -141,69 +138,70 @@ class Bridge:
     def on_fader(self, channel, value):
         """Physical fader `channel` (0-7) moved to pitch-bend `value`.
 
-        Returns (volume_cc, cc_value) to send to jack_mixer, or None if that
-        strip has no mapping.
+        Returns (cc, cc_value) to send to jack_mixer, or None if that fader
+        is not routed to jack_mixer.
         """
         if not 0 <= channel <= 7:
             return None
-        mapping = self.mappings[channel]
-        if not mapping.assigned:
+        cc = self.mappings[channel].cc("fader")
+        if cc is None:
             return None
-        return mapping.volume_cc, pitchbend_to_cc(value)
+        return cc, pitchbend_to_cc(value)
 
     def on_encoder(self, controller, value):
         """Physical encoder sent relative CC `controller` (16-23) = `value`.
 
-        Returns (pan_cc, cc_value) to send to jack_mixer, or None if that
-        strip has no mapping or the value carried no recognizable step.
+        Returns (cc, cc_value) to send to jack_mixer, or None if that encoder
+        is not routed to jack_mixer or the value carried no recognizable step.
         """
         strip = controller - 16
         if not 0 <= strip <= 7:
             return None
-        mapping = self.mappings[strip]
-        if not mapping.assigned:
+        cc = self.mappings[strip].cc("encoder")
+        if cc is None:
             return None
         delta = relative_delta(value) * PAN_STEP
         if delta == 0:
             return None
         new_pan = max(PAN_MIN, min(PAN_MAX, self.pan_state[strip] + delta))
         self.pan_state[strip] = new_pan
-        return mapping.pan_cc, new_pan
+        return cc, new_pan
 
     def on_plugin_fader(self, channel, value):
         """Physical fader `channel` (0-7) moved to pitch-bend `value`.
 
-        Returns (plugin, target, level) with level 0.0-1.0 if that strip is
+        Returns (plugin, target, level) with level 0.0-1.0 if that fader is
         routed to a plugin, else None.
         """
-        if not 0 <= channel <= 7 or not self.mappings[channel].plugin:
+        route = self.mappings[channel].plugin_route("fader") if 0 <= channel <= 7 else None
+        if route is None:
             return None
-        mapping = self.mappings[channel]
         value = max(PITCH_MIN, min(PITCH_MAX, value))
-        return mapping.plugin, mapping.target, (value - PITCH_MIN) / (PITCH_MAX - PITCH_MIN)
+        return route.plugin, route.target, (value - PITCH_MIN) / (PITCH_MAX - PITCH_MIN)
 
     def on_plugin_encoder(self, controller, value):
         """Physical encoder sent relative CC `controller` (16-23) = `value`.
 
-        Returns (plugin, target, delta) if that strip is routed to a plugin
+        Returns (plugin, target, delta) if that encoder is routed to a plugin
         and the value carried a step, else None. Direction follows
         ENCODER_INCREASES_PAN, as for pan.
         """
         strip = controller - 16
-        if not 0 <= strip <= 7 or not self.mappings[strip].plugin:
+        route = self.mappings[strip].plugin_route("encoder") if 0 <= strip <= 7 else None
+        if route is None:
             return None
         delta = relative_delta(value)
         if delta == 0:
             return None
-        return self.mappings[strip].plugin, self.mappings[strip].target, delta
+        return route.plugin, route.target, delta
 
     def on_mixer_volume(self, cc, value):
         """jack_mixer reported CC `cc` = `value`.
 
         Returns (fader_channel, pitch_value) to send back to the SMC, or None
-        if `cc` is not any strip's configured volume_cc.
+        if `cc` is not any fader's CC.
         """
-        strip = self._volume_ccs().get(cc)
+        strip = self._ccs("fader").get(cc)
         if strip is None:
             return None
         return strip, cc_to_pitchbend(value)
@@ -213,10 +211,10 @@ class Bridge:
 
         Updates the stored pan state so the next relative encoder turn starts
         from the right place; there is no hardware equivalent to send back.
-        Returns the strip index updated, or None if `cc` is not any strip's
-        configured pan_cc.
+        Returns the strip index updated, or None if `cc` is not any
+        encoder's CC.
         """
-        strip = self._pan_ccs().get(cc)
+        strip = self._ccs("encoder").get(cc)
         if strip is None:
             return None
         self.pan_state[strip] = max(PAN_MIN, min(PAN_MAX, value))

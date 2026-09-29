@@ -63,14 +63,22 @@ Alternatively, install `requirements.txt` in a Python virtual environment.
 
 ## Try the mapping interface
 
+Every fader, encoder and button is programmed on its own. A strip's fader
+can drive a jack_mixer volume while its encoder tunes a radio through a
+plugin, or either can be left doing nothing.
+
 1. Click a strip's fader, encoder, or channel label.
-2. Check **Assign this strip**, enter a channel name, and enter the volume and
-   pan CC numbers configured for that channel in jack_mixer.
+2. Enter a channel name (a label for the strip). Then, separately for the
+   **Fader** and the **Encoder**, choose what it **Sends to**:
+   - *Nothing*: the control is ignored.
+   - *jack_mixer CC*: enter the CC configured in jack_mixer (usually the
+     channel's volume for the fader and its pan for the encoder).
+   - *Plugin*: see "Sending controls to a plugin" below.
 3. Click **Apply**. Switching strips or keys also applies valid edits;
    invalid edits stay visible for correction.
 4. Click **Save mappings** to persist all eight strips. Saving includes the
    current editor's changes. Restart to verify restoration.
-5. Uncheck **Assign this strip** and apply to clear an assignment.
+5. Set both to *Nothing* and apply to clear a strip.
 
 ### Key actions
 
@@ -96,8 +104,8 @@ pressed**, and Apply. Buttons with an action are highlighted.
   configuration file (and directory) that you own and that no one else can
   write to.
 
-CC numbers must be 0–127 and unique across all assigned volume, pan and key
-MIDI controls.
+CC numbers must be 0–127 and unique across every fader, encoder and key
+sent to jack_mixer.
 The MIDI channel policy will be established with the transport implementation;
 this preview has a single shared CC namespace. Names are descriptive labels;
 jack_mixer channel discovery/configuration is not implemented.
@@ -182,15 +190,30 @@ file and its directory must be owned by you and not writable by others.
 
 ### Sending controls to a plugin
 
-- **Strip:** check **Assign this strip**, set **Send to** to *Plugin*, and
-  enter the plugin and a **target**. The fader is sent as a 0-100% level
-  and the encoder as steps (e.g. one strip's fader as AF gain and its
-  encoder as VFO tuning); which targets exist is up to the plugin.
+- **Fader or encoder:** set its **Sends to** to *Plugin*, and enter the
+  plugin and a **target**. A fader is sent as a 0-100% level and an encoder
+  as steps; which targets exist is up to the plugin. Each is chosen on its
+  own, so one strip's fader can stay on jack_mixer while its encoder tunes
+  a VFO, or both can go to different plugin targets.
 - **Key:** choose **Plugin** under **When pressed**, and a plugin and target.
   The plugin hears both press and release, so push-to-talk works.
 
-In `mappings.ini` these are `plugin =` and `target =` on a strip, and
-`action = plugin` with `plugin =` / `target =` on a key.
+In `mappings.ini` (format 4) each strip lists its two controls on their own:
+
+```ini
+[strip1]
+name = FT-710 Rx
+fader = midi
+fader_cc = 19
+encoder = plugin
+encoder_plugin = hrdctl
+encoder_target = vfo_a
+```
+
+`fader =` / `encoder =` is `midi`, `plugin`, or empty for nothing. A key uses
+`action = plugin` with `plugin =` / `target =`. Files from earlier versions
+still load (`volume_cc`/`pan_cc` become the fader and encoder CCs, and a
+strip's `plugin`/`target` applies to both) and are written back in format 4.
 
 ### Writing a plugin
 
@@ -252,17 +275,19 @@ mode and says so in the log — it never crashes for lack of it.
 
 Translation is deliberately simple:
 
-- Every physical fader move is forwarded immediately as the configured
-  volume CC to jack_mixer. There is **no pickup/soft-takeover logic** — the
+- Every physical fader move is forwarded immediately as the fader's
+  configured CC to jack_mixer. There is **no pickup/soft-takeover logic** — the
   physical fader is always treated as correct. See "Fader feedback behavior"
   below for why that's sufficient.
-- Every physical encoder turn nudges a stored per-strip pan value (starting
+- Every physical encoder turn nudges a stored per-strip value (starting
   centered at 64 on daemon startup) and forwards the new absolute value as
-  the configured pan CC.
-- jack_mixer volume-CC feedback is translated back to Pitch Bend and sent to
-  `SMC Out`.
-- jack_mixer pan-CC feedback updates the stored pan state only (no hardware
-  output — encoders have no absolute position to display).
+  the encoder's configured CC.
+- A fader or encoder sent to a plugin, or to nothing, sends nothing to
+  jack_mixer.
+- jack_mixer feedback on a fader's CC is translated back to Pitch Bend and
+  sent to `SMC Out`.
+- jack_mixer feedback on an encoder's CC updates the stored value only (no
+  hardware output — encoders have no absolute position to display).
 - Pressing a button runs its key action (see "Key actions" above). A
   toggle MIDI key keeps a locally tracked on/off state and sends it as an
   absolute CC (127=on, 0=off); jack_mixer's feedback on that CC updates the

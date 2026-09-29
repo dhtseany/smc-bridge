@@ -6,8 +6,18 @@ import unittest
 
 from PySide6.QtWidgets import QApplication, QCheckBox
 from smc_bridge import plugins
-from smc_bridge.config import Config, KeyAction, Mapping, load, save, validate
-from smc_bridge.gui import PluginsDialog, Window
+from smc_bridge.config import Config, KeyAction, Mapping, Route, load, save, validate
+from smc_bridge.gui import Control, PluginsDialog, Window
+
+
+def mixer(name, volume_cc, pan_cc=None):
+    """A strip whose fader (and encoder, if given a CC) go to jack_mixer."""
+    return Mapping(name, Route.midi(volume_cc), None if pan_cc is None else Route.midi(pan_cc))
+
+
+def plugin_strip(name, plugin, target):
+    """A strip whose fader and encoder both go to one plugin target."""
+    return Mapping(name, Route.to_plugin(plugin, target), Route.to_plugin(plugin, target))
 
 
 def config(*mappings, **keys):
@@ -32,25 +42,45 @@ class ConfigTests(unittest.TestCase):
     def test_roundtrip_and_conflict_preserves_saved_file(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "nested" / "mappings.ini"
-            original_config = config(Mapping("Desk Mic 100%", 11, 12))
+            original_config = config(mixer("Desk Mic 100%", 11, 12))
             save(path, original_config)
             self.assertEqual(load(path), original_config)
             original = path.read_bytes()
-            original_config.mappings[1] = Mapping("PC", 12, 15)
+            original_config.mappings[1] = mixer("PC", 12, 15)
             with self.assertRaisesRegex(ValueError, "already used"):
                 save(path, original_config)
             self.assertEqual(path.read_bytes(), original)
 
     def test_invalid_mappings(self):
-        for mapping in (Mapping("Mic", 128, 1), Mapping("Mic", 1, None), Mapping("", 1, 2), Mapping("Mic", 1, 1)):
+        for mapping in (mixer("Mic", 128, 1), Mapping("Mic", Route("pan", cc=1)), mixer("", 1, 2), mixer("Mic", 1, 1)):
             with self.subTest(mapping=mapping), self.assertRaises(ValueError):
                 validate(config(mapping))
+
+    def test_pan_cc_is_optional(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mappings.ini"
+            volume_only = config(mixer("FT-710 Rx", 19))
+            save(path, volume_only)
+            loaded = load(path)
+            self.assertEqual(loaded, volume_only)
+            self.assertIsNone(loaded.mappings[0].encoder)
+
+    def test_format_3_strips_migrate_to_independent_routes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mappings.ini"
+            path.write_text(
+                "[app]\nformat_version = 3\n\n[strip1]\nname = Mic\nvolume_cc = 11\npan_cc = 12\n\n"
+                "[strip2]\nname = VFO A\nvolume_cc =\npan_cc =\nplugin = hrdctl\ntarget = vfo_a\n"
+                + "".join(f"\n[strip{i}]\nname =\nvolume_cc =\npan_cc =\n" for i in range(3, 9))
+            )
+            path.chmod(0o600)
+            self.assertEqual(load(path), config(mixer("Mic", 11, 12), plugin_strip("VFO A", "hrdctl", "vfo_a")))
 
     def test_every_key_action_kind_roundtrips(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mappings.ini"
             expected = config(
-                Mapping("Desk Mic", 11, 12),
+                mixer("Desk Mic", 11, 12),
                 strip1__mute=KeyAction("midi", 13),
                 transport__record=KeyAction("midi", 40, mode="momentary"),
                 transport__play=KeyAction("media", media="play_pause"),
@@ -63,7 +93,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mappings.ini"
             path.write_text(V1_FILE)
-            self.assertEqual(load(path), config(Mapping("Desk Mic", 11, 12), strip1__mute=KeyAction("midi", 13)))
+            self.assertEqual(load(path), config(mixer("Desk Mic", 11, 12), strip1__mute=KeyAction("midi", 13)))
 
     def test_invalid_key_actions(self):
         for keys in (
@@ -81,7 +111,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_key_cc_conflicts_with_strip_and_other_keys(self):
         with self.assertRaisesRegex(ValueError, "already used"):
-            validate(config(Mapping("Desk Mic", 11, 12), strip1__mute=KeyAction("midi", 12)))
+            validate(config(mixer("Desk Mic", 11, 12), strip1__mute=KeyAction("midi", 12)))
         with self.assertRaisesRegex(ValueError, "already used"):
             validate(config(strip1__mute=KeyAction("midi", 20), strip1__solo=KeyAction("midi", 20)))
 
@@ -103,7 +133,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_plugin_routes_require_a_private_file(self):
         for routed in (
-            config(Mapping("VFO A", plugin="hrdctl", target="vfo_a")),
+            config(plugin_strip("VFO A", "hrdctl", "vfo_a")),
             config(transport__record=KeyAction("plugin", plugin="hrdctl", target="ptt")),
         ):
             with self.subTest(config=routed), tempfile.TemporaryDirectory() as directory:
@@ -144,47 +174,81 @@ class GuiTests(unittest.TestCase):
         self.window.close()
         self.temp.cleanup()
 
+    def _route(self, editor, kind, cc=None, plugin="", target=""):
+        editor.kind.setCurrentIndex(editor.kind.findData(kind))
+        if cc is not None:
+            editor.cc.setValue(cc)
+        editor.plugin.setCurrentText(plugin)
+        editor.target.setText(target)
+
     def test_edit_save_restart_and_clear(self):
         window = self.window
-        window.enabled.setChecked(True)
         window.name.setText("Desk Mic")
-        window.volume.setValue(11)
-        window.pan.setValue(12)
+        self._route(window.fader, "midi", 11)
+        self._route(window.encoder, "midi", 12)
         window.save_button.click()
-        self.assertEqual(load(self.path).mappings[0], Mapping("Desk Mic", 11, 12))
+        self.assertEqual(load(self.path).mappings[0], mixer("Desk Mic", 11, 12))
         restored = Window(self.path)
         self.assertEqual(restored.name.text(), "Desk Mic")
-        self.assertTrue(restored.enabled.isChecked())
+        self.assertEqual(restored.fader.kind.currentData(), "midi")
+        self.assertEqual(restored.encoder.cc.value(), 12)
         restored.close()
-        window.enabled.setChecked(False)
+        self._route(window.fader, "")
+        self._route(window.encoder, "")
         window.save_button.click()
         self.assertEqual(load(self.path).mappings[0], Mapping())
 
     def test_invalid_edit_blocks_navigation(self):
         window = self.window
-        window.enabled.setChecked(True)
         window.name.setText("Mic")
+        self._route(window.fader, "midi")
         window.strips[1].button.click()
         self.assertEqual(window.selected, 0)
-        self.assertIn("Choose both", window.error.text())
-        window.volume.setValue(11)
-        window.pan.setValue(12)
+        self.assertIn("Choose the CC number the fader sends", window.error.text())
+        window.fader.cc.setValue(11)
         window.strips[1].button.click()
         self.assertEqual(window.selected, 1)
-        window.enabled.setChecked(True)
         window.name.setText("PC")
-        window.volume.setValue(11)
-        window.pan.setValue(14)
+        self._route(window.encoder, "midi", 11)
         self.assertFalse(window.apply())
         self.assertIn("already used", window.error.text())
-        self.assertFalse(window.config.mappings[1].assigned)
+        self.assertFalse(window.config.mappings[1].used)
+
+    def test_fader_and_encoder_are_routed_independently(self):
+        window = self.window
+        window.show()
+        window.name.setText("FT-710 Rx")
+        self._route(window.fader, "midi", 19)
+        self._route(window.encoder, "plugin", plugin="hrdctl", target="vfo_a")
+        self.assertTrue(window.fader.form.isRowVisible(window.fader.cc))
+        self.assertFalse(window.fader.form.isRowVisible(window.fader.target))
+        self.assertFalse(window.encoder.form.isRowVisible(window.encoder.cc))
+        self.assertTrue(window.encoder.form.isRowVisible(window.encoder.target))
+        self.assertTrue(window.apply())
+        self.assertEqual(window.strips[0].mapping_label.text(), "CC 19 · hrdctl")
+        window.select(1)
+        window.name.setText("Spare")
+        self._route(window.encoder, "midi", 20)
+        window.save_button.click()
+        saved = load(self.path)
+        self.assertEqual(saved.mappings[0], Mapping("FT-710 Rx", Route.midi(19), Route.to_plugin("hrdctl", "vfo_a")))
+        self.assertEqual(saved.mappings[1], Mapping("Spare", None, Route.midi(20)))
+        self.assertEqual(window.strips[1].mapping_label.text(), "— · CC 20")
+
+    def test_clicking_a_control_focuses_its_editor(self):
+        window = self.window
+        self._activate(window)
+        window.strips[3].findChildren(Control)[1].click()  # the fader
+        self.assertEqual(window.selected, 3)
+        self.assertTrue(window.fader.kind.hasFocus())
+        window.strips[3].findChildren(Control)[0].click()  # the encoder
+        self.assertTrue(window.encoder.kind.hasFocus())
 
     def _assign(self, window, strip_index, name, volume_cc, pan_cc):
         window.select(strip_index)
-        window.enabled.setChecked(True)
         window.name.setText(name)
-        window.volume.setValue(volume_cc)
-        window.pan.setValue(pan_cc)
+        self._route(window.fader, "midi", volume_cc)
+        self._route(window.encoder, "midi", pan_cc)
         self.assertTrue(window.apply())
 
     def _activate(self, window):
@@ -227,27 +291,22 @@ class GuiTests(unittest.TestCase):
 
     def test_strip_and_key_can_be_sent_to_a_plugin(self):
         window = self.window
-        window.show()
         window.select(7)
-        window.enabled.setChecked(True)
         window.name.setText("VFO A")
-        window.route.setCurrentIndex(window.route.findData("plugin"))
-        self.assertFalse(window.strip_form.isRowVisible(window.volume))
-        self.assertTrue(window.strip_form.isRowVisible(window.strip_target))
-        window.strip_plugin.setCurrentText("hrdctl")
-        window.strip_target.setText("vfo_a")
+        self._route(window.fader, "plugin", plugin="hrdctl", target="vfo_a")
+        self._route(window.encoder, "plugin", plugin="hrdctl", target="vfo_a")
         window.key_buttons["transport.record"].click()
         window.action.setCurrentIndex(window.action.findData("plugin"))
         window.key_plugin.setCurrentText("hrdctl")
         window.key_target.setText("ptt")
         self.assertTrue(window.save())
         saved = load(self.path)
-        self.assertEqual(saved.mappings[7], Mapping("VFO A", plugin="hrdctl", target="vfo_a"))
+        self.assertEqual(saved.mappings[7], plugin_strip("VFO A", "hrdctl", "vfo_a"))
         self.assertEqual(saved.keys, {"transport.record": KeyAction("plugin", plugin="hrdctl", target="ptt")})
-        self.assertEqual(window.strips[7].mapping_label.text(), "hrdctl · vfo_a")
+        self.assertEqual(window.strips[7].mapping_label.text(), "hrdctl · hrdctl")
         window.select(7)
-        self.assertEqual(window.route.currentData(), "plugin")
-        self.assertEqual(window.strip_plugin.currentText(), "hrdctl")
+        self.assertEqual(window.encoder.kind.currentData(), "plugin")
+        self.assertEqual(window.fader.plugin.currentText(), "hrdctl")
 
     def test_plugins_dialog_toggles_plugins_ini(self):
         settings = Path(self.temp.name) / "plugins.ini"
