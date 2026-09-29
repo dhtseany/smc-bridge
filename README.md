@@ -26,8 +26,9 @@ Build and install with the supplied `PKGBUILD`:
 makepkg -si
 ```
 
-This installs the `smc-bridge` command, its `python-pyside6` dependency, and
-the systemd user unit. `python-pyalsa` (needed for the live MIDI transport,
+This installs the `smc-bridge` command, its `pyside6` dependency, the systemd
+user unit, and an **SMC Bridge** launcher with its icon in your desktop's
+application menu. `python-pyalsa` (needed for the live MIDI transport,
 see "Live MIDI bridge" below) is an optional dependency; install it too if you
 want live hardware control rather than just the mapping GUI:
 

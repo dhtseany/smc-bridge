@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smc-bridge"
-version = "1.0.2"
+version = "1.0.3"
 description = "A bridge app, written in Python, that works between an M-Vave SMC-Mixer and jack_mixer using mac2CC (MIDI Absolute Control to CC)."
 readme = "README.md"
 license = "GPL-3.0-or-later"
