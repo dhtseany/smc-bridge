@@ -173,6 +173,10 @@ def load(path):
         validate(config)
         if any(action.kind == "command" for action in config.keys.values()):
             check_private(path, "to use command keys")
+        # A plugin route fires an action of a plugin you trusted (a radio's
+        # push-to-talk, say), so it needs the same protection.
+        if any(m.plugin for m in config.mappings) or any(a.kind == "plugin" for a in config.keys.values()):
+            check_private(path, "to send controls to plugins")
         return config
     except (ConfigError, KeyError) as error:
         raise ValueError(f"Invalid configuration: {error}") from error

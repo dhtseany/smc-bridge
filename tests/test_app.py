@@ -101,6 +101,26 @@ class ConfigTests(unittest.TestCase):
             finally:
                 Path(directory).chmod(0o700)
 
+    def test_plugin_routes_require_a_private_file(self):
+        for routed in (
+            config(Mapping("VFO A", plugin="hrdctl", target="vfo_a")),
+            config(transport__record=KeyAction("plugin", plugin="hrdctl", target="ptt")),
+        ):
+            with self.subTest(config=routed), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "mappings.ini"
+                save(path, routed)
+                self.assertEqual(load(path), routed)
+                path.chmod(0o666)
+                with self.assertRaisesRegex(ValueError, "not writable by others to send controls to plugins"):
+                    load(path)
+                path.chmod(0o600)
+                Path(directory).chmod(0o777)
+                try:
+                    with self.assertRaisesRegex(ValueError, "not writable by others"):
+                        load(path)
+                finally:
+                    Path(directory).chmod(0o700)
+
     def test_non_command_keys_load_from_shared_file(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mappings.ini"
