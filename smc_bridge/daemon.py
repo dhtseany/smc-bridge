@@ -9,6 +9,7 @@ import tempfile
 import threading
 
 from .config import load
+from .plugins import PluginHost, load_settings, settings_path
 
 LOG = logging.getLogger(__name__)
 
@@ -57,25 +58,45 @@ class ConfigurationState:
             return False
         self.last_signature = signature
         try:
-            # Missing files are acceptable only at first launch. Deleting the
-            # file while running must not silently clear all active mappings.
-            if not initial and not self.path.exists():
-                raise ValueError("Configuration is missing; retaining the last valid mappings.")
-            config = load(self.path)
+            config = self._load(initial)
         except (OSError, ValueError) as error:
             if initial:
                 raise
             LOG.error("Configuration reload rejected: %s", error)
             return False
         self.config = config
-        LOG.info(
-            "Loaded %d assigned strips and %d key actions from %s",
-            sum(m.assigned for m in config.mappings), len(config.keys), self.path,
-        )
+        LOG.info("Loaded %s from %s", self._describe(config), self.path)
         return True
 
+    def _load(self, initial):
+        # Missing files are acceptable only at first launch. Deleting the
+        # file while running must not silently clear all active mappings.
+        if not initial and not self.path.exists():
+            raise ValueError("Configuration is missing; retaining the last valid mappings.")
+        return load(self.path)
 
-def run(path):
+    def _describe(self, config):
+        plugin_strips = sum(bool(m.plugin) for m in config.mappings)
+        return f"{sum(m.assigned for m in config.mappings)} assigned strips{f' and {plugin_strips} plugin strips' if plugin_strips else ''} and {len(config.keys)} key actions"
+
+
+class PluginSettingsState(ConfigurationState):
+    """plugins.ini. Deleting it is a way to turn every plugin off, so a missing file is fine."""
+
+    def __init__(self, path):
+        super().__init__(path)
+        self.config = {}
+
+    def _load(self, initial):
+        return load_settings(self.path)
+
+    def _describe(self, settings):
+        enabled = sorted(name for name, s in settings.items() if s.enabled)
+        return f"plugin settings (enabled: {', '.join(enabled) or 'none'})"
+
+
+def run(path, plugins=True):
+    """Run the bridge until signalled. `plugins`=False is safe mode: no plugin is loaded."""
     level = logging.DEBUG if os.environ.get("SMC_BRIDGE_DEBUG") else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)s %(message)s")
     stop = threading.Event()
@@ -85,13 +106,24 @@ def run(path):
         with InstanceLock():
             state = ConfigurationState(path)
             state.refresh(initial=True)
+            host = PluginHost(enabled=plugins)
+            plugin_state = PluginSettingsState(settings_path(path))
+            if plugins:
+                try:
+                    plugin_state.refresh(initial=True)
+                except (OSError, ValueError) as error:
+                    # A bad plugins.ini must not take the mixer down with it.
+                    LOG.error("Plugins disabled until plugins.ini is fixed: %s", error)
+                host.configure(plugin_state.config)
+            else:
+                LOG.warning("Safe mode: plugins are turned off (--no-plugins or SMC_BRIDGE_NO_PLUGINS)")
             for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
                 old_handlers[number] = signal.getsignal(number)
                 signal.signal(number, lambda signum, frame: reload_requested.set() if signum == signal.SIGHUP else stop.set())
             transport = None
             if Transport is not None:
                 try:
-                    transport = Transport(state.config)
+                    transport = Transport(state.config, plugins=host)
                     transport.start()
                     LOG.warning(
                         "MIDI transport active: client %r (id %d), ports SMC In/Out, Mixer In/Out. PID %d",
@@ -108,9 +140,12 @@ def run(path):
                     reload_requested.clear()
                     if state.refresh(force=force) and transport is not None:
                         transport.update_config(state.config)
+                    if plugins and (plugin_state.refresh(force=force) or force):
+                        host.configure(plugin_state.config, retry_failed=force)
             finally:
                 if transport is not None:
                     transport.stop()
+                host.stop()
             LOG.info("Background process stopped cleanly")
         return 0
     except (OSError, ValueError, RuntimeError) as error:

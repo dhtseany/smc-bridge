@@ -30,8 +30,9 @@ _CAP_OUT = alsaseq.SEQ_PORT_CAP_READ | alsaseq.SEQ_PORT_CAP_SUBS_READ
 class Transport:
     """Owns the ALSA client/ports and a background thread pumping events through a Bridge."""
 
-    def __init__(self, config, clientname=CLIENT_NAME):
+    def __init__(self, config, clientname=CLIENT_NAME, plugins=None):
         self.seq = alsaseq.Sequencer(clientname=clientname)
+        self.plugins = plugins
         self.bridge = Bridge(list(config.mappings), dict(config.keys))
         self._lock = threading.Lock()
         self.smc_in = self.seq.create_simple_port("SMC In", _PORT_TYPE, _CAP_IN)
@@ -109,11 +110,21 @@ class Transport:
     def _handle_smc(self, event):
         data = event.get_data()
         if event.type == alsaseq.SEQ_EVENT_PITCHBEND:
+            routed = self.bridge.on_plugin_fader(data["control.channel"], data["control.value"])
+            if routed:
+                if self.plugins is not None:
+                    self.plugins.fader(*routed)
+                return
             result = self.bridge.on_fader(data["control.channel"], data["control.value"])
             if result:
                 cc, cc_value = result
                 self._send_controller(self.mixer_out, MIXER_MIDI_CHANNEL, cc, cc_value)
         elif event.type == alsaseq.SEQ_EVENT_CONTROLLER:
+            routed = self.bridge.on_plugin_encoder(data["control.param"], data["control.value"])
+            if routed:
+                if self.plugins is not None:
+                    self.plugins.encoder(*routed)
+                return
             result = self.bridge.on_encoder(data["control.param"], data["control.value"])
             if result:
                 cc, cc_value = result
@@ -135,6 +146,8 @@ class Transport:
                 actions.run_media(result[1])
             elif result[0] == "command":
                 actions.run_command(result[1])
+            elif result[0] == "plugin" and self.plugins is not None:
+                self.plugins.key(*result[1:])
 
     def _handle_mixer(self, event):
         if event.type != alsaseq.SEQ_EVENT_CONTROLLER:

@@ -117,6 +117,107 @@ The human-readable INI file defaults to:
 python3 -m smc_bridge --config /tmp/smc-bridge-demo.ini
 ```
 
+## Plugins
+
+Plugins add destinations beyond jack_mixer: a strip's fader and encoder, or
+any key, can be sent to a plugin instead (for example `smc-bridge-hrdctl`,
+which drives a remote Ham Radio Deluxe). A plugin is a separate package;
+installing one does nothing until you enable it.
+
+### Turning plugins on and off
+
+Click **Plugins…** in the mapping window and tick or untick a plugin, or:
+
+```sh
+smc-bridge --list-plugins
+```
+
+```sh
+smc-bridge --enable-plugin hrdctl
+```
+
+```sh
+smc-bridge --disable-plugin hrdctl
+```
+
+Either way, a running background bridge starts or stops the plugin within a
+second; no restart is needed. If a plugin misbehaves badly enough that you
+want none at all, start the bridge in safe mode, which loads no plugins:
+
+```sh
+systemctl --user set-environment SMC_BRIDGE_NO_PLUGINS=1
+```
+
+```sh
+systemctl --user restart smc-bridge
+```
+
+(`systemctl --user unset-environment SMC_BRIDGE_NO_PLUGINS` and restart again
+to undo; `smc-bridge --headless --no-plugins` does the same from a terminal.)
+
+The bridge also protects itself: each plugin runs on its own thread, so a
+slow or hung connection never delays MIDI (the plugin's events are dropped
+instead, with a warning). A plugin that fails to start, or fails five events
+in a row, is switched off and logged; `systemctl --user reload smc-bridge`
+(or disabling and re-enabling it) tries it again. See
+`journalctl --user -u smc-bridge` for what happened.
+
+### Plugin settings
+
+Enabled state and each plugin's own settings live in `plugins.ini`, beside
+`mappings.ini`:
+
+```ini
+[hrdctl]
+enabled = yes
+host = 192.168.1.20
+port = 7809
+```
+
+Everything except `enabled` is passed to the plugin; see its documentation
+for what it reads. Toggling keeps your settings and comments. Deleting the
+file turns every plugin off. Because it decides what code runs as you, the
+file and its directory must be owned by you and not writable by others.
+
+### Sending controls to a plugin
+
+- **Strip:** check **Assign this strip**, set **Send to** to *Plugin*, and
+  enter the plugin and a **target**. The fader is sent as a 0-100% level
+  and the encoder as steps (e.g. one strip's fader as AF gain and its
+  encoder as VFO tuning); which targets exist is up to the plugin.
+- **Key:** choose **Plugin** under **When pressed**, and a plugin and target.
+  The plugin hears both press and release, so push-to-talk works.
+
+In `mappings.ini` these are `plugin =` and `target =` on a strip, and
+`action = plugin` with `plugin =` / `target =` on a key.
+
+### Writing a plugin
+
+A plugin package registers an entry point in the `smc_bridge.plugins` group:
+
+```toml
+[project.entry-points."smc_bridge.plugins"]
+hrdctl = "smc_bridge_hrdctl:HrdPlugin"
+```
+
+and subclasses `smc_bridge.plugins.Plugin`:
+
+```python
+from smc_bridge.plugins import Plugin
+
+class HrdPlugin(Plugin):
+    def start(self):                       # self.settings: its plugins.ini section
+        ...                                # connect; raising leaves the plugin off
+    def stop(self): ...
+    def on_fader(self, target, level): ...    # level 0.0-1.0
+    def on_encoder(self, target, delta): ...  # signed steps
+    def on_key(self, target, pressed): ...
+```
+
+All methods run on the plugin's own thread. Handle reconnecting to the
+remote end inside the plugin; exceptions are logged, and repeated ones turn
+the plugin off.
+
 ## Development checks
 
 ```sh

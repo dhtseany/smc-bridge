@@ -2,7 +2,7 @@
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QCheckBox, QComboBox, QFormLayout, QFrame, QHBoxLayout,
+    QAbstractButton, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea,
     QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
@@ -10,8 +10,10 @@ from PySide6.QtWidgets import (
 from .actions import MEDIA_ACTIONS
 from .bridge import KEY_NOTES
 from .config import Config, KeyAction, Mapping, load, save, validate
+from . import plugins
 
-ACTION_CHOICES = (("", "Nothing"), ("midi", "MIDI CC to jack_mixer"), ("media", "Media command"), ("command", "Shell command"))
+ACTION_CHOICES = (("", "Nothing"), ("midi", "MIDI CC to jack_mixer"), ("media", "Media command"), ("command", "Shell command"), ("plugin", "Plugin"))
+ROUTE_CHOICES = (("mixer", "jack_mixer"), ("plugin", "Plugin"))
 MODE_CHOICES = (("toggle", "Toggle (press on, press off)"), ("momentary", "Momentary (on while held)"))
 STRIP_KEY_BUTTONS = (("mute", "M", "Mute"), ("solo", "S", "Solo"), ("rec", "R", "R button"), ("select", "□", "Square (Select) button"))
 # Exact left-to-right symbol order from the supplied hardware photo.
@@ -34,7 +36,71 @@ def describe(action):
         return f"MIDI CC {action.cc}, {action.mode}"
     if action.kind == "media":
         return MEDIA_ACTIONS[action.media][0]
+    if action.kind == "plugin":
+        return f"plugin {action.plugin} → {action.target}"
     return f"runs: {action.command}"
+
+
+def plugin_combo():
+    """Installed plugins to pick from; editable, since one may be set up before it is installed."""
+    combo = QComboBox()
+    combo.setEditable(True)
+    combo.addItems(sorted(plugins.installed()))
+    combo.setCurrentIndex(-1)
+    combo.lineEdit().setPlaceholderText("e.g. hrdctl")
+    return combo
+
+
+class PluginsDialog(QDialog):
+    """Turn installed plugins on and off. Each change is written at once and
+    a running background bridge picks it up within a second."""
+
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.setWindowTitle("Plugins")
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        self.error = label("", "error")
+        self.error.setWordWrap(True)
+        available = plugins.installed()
+        try:
+            settings = plugins.load_settings(path)
+        except (OSError, ValueError) as error:
+            settings = None
+            self.error.setText(f"Cannot read {path}: {error}")
+        names = sorted(set(available) | set(settings or {}))
+        if not names:
+            layout.addWidget(label("No plugins are installed.", "muted"))
+        for name in names:
+            entry = available.get(name)
+            source = f"{entry.dist.name} {entry.dist.version}" if entry is not None and entry.dist else "not installed"
+            box = QCheckBox(f"{name}   ·   {source}")
+            box.setChecked(bool(settings and name in settings and settings[name].enabled))
+            box.setEnabled(settings is not None and (entry is not None or box.isChecked()))
+            box.toggled.connect(lambda checked, name=name, box=box: self.toggle(name, checked, box))
+            layout.addWidget(box)
+        note = label(
+            f"Changes take effect in the running background bridge within a second. "
+            f"Plugin settings (host, port, ...) live in {path}. "
+            f"If a plugin misbehaves, untick it here, or start the bridge with --no-plugins.", "muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addWidget(self.error)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def toggle(self, name, enabled, box):
+        try:
+            plugins.set_enabled(self.path, name, enabled)
+        except (OSError, ValueError) as error:
+            self.error.setText(f"Could not change {name}: {error}")
+            box.blockSignals(True)
+            box.setChecked(not enabled)
+            box.blockSignals(False)
+            return
+        self.error.setText("")
 
 STYLE = """
 QWidget { background: #171b21; color: #e4e9ee; font-family: 'DejaVu Sans'; font-size: 13px; }
@@ -199,9 +265,13 @@ class Strip(QFrame):
         self.setProperty("selected", selected)
         self.style().unpolish(self)
         self.style().polish(self)
-        self.button.setText(mapping.name if mapping.assigned else "Unassigned")
-        self.button.setToolTip(mapping.name if mapping.assigned else "Click to assign a mixer channel")
-        self.mapping_label.setText(f"VOL {mapping.volume_cc} · PAN {mapping.pan_cc}" if mapping.assigned else "—  ·  —")
+        used = mapping.assigned or bool(mapping.plugin)
+        self.button.setText(mapping.name if used else "Unassigned")
+        self.button.setToolTip(mapping.name if used else "Click to assign a mixer channel")
+        if mapping.plugin:
+            self.mapping_label.setText(f"{mapping.plugin} · {mapping.target}")
+        else:
+            self.mapping_label.setText(f"VOL {mapping.volume_cc} · PAN {mapping.pan_cc}" if mapping.assigned else "—  ·  —")
 
 
 class Window(QMainWindow):
@@ -233,6 +303,10 @@ class Window(QMainWindow):
         top = QHBoxLayout()
         top.addWidget(label("Your surface. Your channels.", "title"))
         top.addStretch()
+        self.plugins_button = QPushButton("Plugins…")
+        self.plugins_button.setToolTip("Turn plugins on and off")
+        self.plugins_button.clicked.connect(lambda: PluginsDialog(plugins.settings_path(self.path), self).exec())
+        top.addWidget(self.plugins_button)
         self.reload_button = QPushButton("Reload saved")
         self.reload_button.clicked.connect(self.reload)
         top.addWidget(self.reload_button)
@@ -313,15 +387,24 @@ class Window(QMainWindow):
         for spin in (self.volume, self.pan, self.key_cc):
             spin.setRange(-1, 127)
             spin.setSpecialValueText("Choose CC")
-        form = QFormLayout()
-        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        form.addRow("Mixer channel name", self.name)
-        form.addRow("Volume CC", self.volume)
-        form.addRow("Pan CC", self.pan)
-        strip_layout.addLayout(form)
-        note = label("Use the CC numbers assigned to this channel in jack_mixer. Names are labels, not automatic discovery. Mute and Solo are set on their own buttons.", "muted")
-        note.setWordWrap(True)
-        strip_layout.addWidget(note)
+        self.route = QComboBox()
+        for value, text in ROUTE_CHOICES:
+            self.route.addItem(text, value)
+        self.strip_plugin = plugin_combo()
+        self.strip_target = QLineEdit()
+        self.strip_target.setPlaceholderText("e.g. vfo_a")
+        self.strip_form = QFormLayout()
+        self.strip_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        self.strip_form.addRow("Channel name", self.name)
+        self.strip_form.addRow("Send to", self.route)
+        self.strip_form.addRow("Volume CC", self.volume)
+        self.strip_form.addRow("Pan CC", self.pan)
+        self.strip_form.addRow("Plugin", self.strip_plugin)
+        self.strip_form.addRow("Plugin target", self.strip_target)
+        strip_layout.addLayout(self.strip_form)
+        self.strip_note = label("", "muted")
+        self.strip_note.setWordWrap(True)
+        strip_layout.addWidget(self.strip_note)
         strip_layout.addStretch()
         self.pages.addWidget(strip_page)
 
@@ -340,11 +423,16 @@ class Window(QMainWindow):
             self.media.addItem(text, value)
         self.command = QLineEdit()
         self.command.setPlaceholderText("e.g. notify-send 'SMC' 'Hello'")
+        self.key_plugin = plugin_combo()
+        self.key_target = QLineEdit()
+        self.key_target.setPlaceholderText("e.g. ptt")
         self.key_form.addRow("When pressed", self.action)
         self.key_form.addRow("CC sent to jack_mixer", self.key_cc)
         self.key_form.addRow("Behavior", self.mode)
         self.key_form.addRow("Media command", self.media)
         self.key_form.addRow("Shell command", self.command)
+        self.key_form.addRow("Plugin", self.key_plugin)
+        self.key_form.addRow("Plugin target", self.key_target)
         self.key_note = label("", "muted")
         self.key_note.setWordWrap(True)
         self.key_form.addRow(self.key_note)
@@ -372,10 +460,13 @@ class Window(QMainWindow):
         self.name.textChanged.connect(self.edited)
         self.volume.valueChanged.connect(self.edited)
         self.pan.valueChanged.connect(self.edited)
-        for combo in (self.action, self.mode, self.media):
+        for combo in (self.action, self.mode, self.media, self.route):
             combo.currentIndexChanged.connect(self.edited)
+        for combo in (self.strip_plugin, self.key_plugin):
+            combo.currentTextChanged.connect(self.edited)
         self.key_cc.valueChanged.connect(self.edited)
-        self.command.textChanged.connect(self.edited)
+        for line in (self.command, self.strip_target, self.key_target):
+            line.textChanged.connect(self.edited)
         self.populate()
         self.refresh()
         if initial_error:
@@ -384,16 +475,28 @@ class Window(QMainWindow):
             self.feedback.setText("Saved mappings loaded." if path.exists() else "Start by selecting a strip and assigning its mixer channel.")
 
     def edited(self, *_):
-        for widget in (self.name, self.volume, self.pan):
+        for widget in (self.name, self.route, self.volume, self.pan, self.strip_plugin, self.strip_target):
             widget.setEnabled(self.enabled.isChecked())
+        to_plugin = self.route.currentData() == "plugin"
+        for widget, shown in ((self.volume, not to_plugin), (self.pan, not to_plugin), (self.strip_plugin, to_plugin), (self.strip_target, to_plugin)):
+            self.strip_form.setRowVisible(widget, shown)
+        self.strip_note.setText(
+            "The fader (as a 0-100% level) and the encoder (as steps) go to the plugin target; what the target means is up to the plugin. Turn plugins on with Plugins…."
+            if to_plugin else
+            "Use the CC numbers assigned to this channel in jack_mixer. Names are labels, not automatic discovery. Mute and Solo are set on their own buttons."
+        )
         kind = self.action.currentData()
-        for widget, kinds in ((self.key_cc, ("midi",)), (self.mode, ("midi",)), (self.media, ("media",)), (self.command, ("command",))):
+        for widget, kinds in (
+            (self.key_cc, ("midi",)), (self.mode, ("midi",)), (self.media, ("media",)), (self.command, ("command",)),
+            (self.key_plugin, ("plugin",)), (self.key_target, ("plugin",)),
+        ):
             self.key_form.setRowVisible(widget, kind in kinds)
         self.key_note.setText({
             "": "This key does nothing.",
             "midi": "Toggle lights the key's LED while on and follows jack_mixer's feedback on the same CC, like Mute and Solo.",
             "media": "Sent to the active media player (MPRIS), like a keyboard media key.",
             "command": "Runs with /bin/sh in the background daemon, as you, once per press.",
+            "plugin": "Sent to the plugin on press and on release (so a plugin can do push-to-talk). Turn plugins on with Plugins….",
         }[kind])
         if not self.loading:
             self.draft_dirty = True
@@ -411,8 +514,11 @@ class Window(QMainWindow):
                 f"Pan encoder: CC {16 + self.selected}, ch 0\n"
                 f"(channel numbers are zero-based)"
             )
-            self.enabled.setChecked(mapping.assigned)
+            self.enabled.setChecked(mapping.assigned or bool(mapping.plugin))
             self.name.setText(mapping.name)
+            self.route.setCurrentIndex(self.route.findData("plugin" if mapping.plugin else "mixer"))
+            self.strip_plugin.setCurrentText(mapping.plugin)
+            self.strip_target.setText(mapping.target)
             self.volume.setValue(mapping.volume_cc if mapping.volume_cc is not None else -1)
             self.pan.setValue(mapping.pan_cc if mapping.pan_cc is not None else -1)
         else:
@@ -425,6 +531,8 @@ class Window(QMainWindow):
             self.mode.setCurrentIndex(self.mode.findData(action.mode))
             self.media.setCurrentIndex(max(0, self.media.findData(action.media)))
             self.command.setText(action.command)
+            self.key_plugin.setCurrentText(action.plugin)
+            self.key_target.setText(action.target)
         self.edited()
         self.error.setText("")
         self.loading = False
@@ -450,6 +558,8 @@ class Window(QMainWindow):
             return KeyAction("media", media=self.media.currentData())
         if kind == "command":
             return KeyAction("command", command=self.command.text().strip())
+        if kind == "plugin":
+            return KeyAction("plugin", plugin=self.key_plugin.currentText().strip(), target=self.key_target.text().strip())
         return None
 
     def apply(self):
@@ -461,6 +571,11 @@ class Window(QMainWindow):
                     candidate.keys.pop(self.selected_key, None)
                 else:
                     candidate.keys[self.selected_key] = action
+            elif self.enabled.isChecked() and self.route.currentData() == "plugin":
+                candidate.mappings[self.selected] = Mapping(
+                    self.name.text().strip(),
+                    plugin=self.strip_plugin.currentText().strip(), target=self.strip_target.text().strip(),
+                )
             elif self.enabled.isChecked():
                 if self.volume.value() < 0 or self.pan.value() < 0:
                     raise ValueError("Choose both volume and pan CC numbers.")

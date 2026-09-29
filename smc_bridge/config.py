@@ -3,26 +3,32 @@ from configparser import ConfigParser, Error as ConfigError
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import re
 import stat
 import tempfile
 
 from .actions import MEDIA_ACTIONS
 from .bridge import KEY_NOTES
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 KEY_SECTION = "key:"
-KEY_KINDS = ("midi", "media", "command")
+KEY_KINDS = ("midi", "media", "command", "plugin")
 MIDI_MODES = ("toggle", "momentary")
+PLUGIN_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 
 
 @dataclass(frozen=True)
 class Mapping:
+    """A strip sends its fader and encoder to jack_mixer CCs, or to a plugin target."""
     name: str = ""
     volume_cc: int | None = None
     pan_cc: int | None = None
+    plugin: str = ""
+    target: str = ""
 
     @property
     def assigned(self):
+        """Mapped to jack_mixer (plugin strips are not)."""
         return self.volume_cc is not None and self.pan_cc is not None
 
 
@@ -34,6 +40,8 @@ class KeyAction:
     mode: str = "toggle"
     media: str = ""
     command: str = ""
+    plugin: str = ""
+    target: str = ""
 
 
 @dataclass
@@ -45,6 +53,15 @@ class Config:
 
 def default_path():
     return Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "smc_bridge" / "mappings.ini"
+
+
+def _check_plugin_route(owner, plugin, target):
+    if not PLUGIN_NAME.match(plugin):
+        raise ValueError(f"{owner}: plugin names are lowercase letters, digits, - and _.")
+    if not target.strip():
+        raise ValueError(f"{owner}: enter the plugin target.")
+    if any(c in target for c in "\n\r\0"):
+        raise ValueError(f"{owner}: the plugin target must fit on one line.")
 
 
 def validate(config):
@@ -65,7 +82,11 @@ def validate(config):
             raise ValueError(f"Strip {strip}: channel names must fit on one line.")
         if (mapping.volume_cc is None) != (mapping.pan_cc is None):
             raise ValueError(f"Strip {strip}: assign both volume and pan CCs, or neither.")
-        if mapping.assigned and not mapping.name.strip():
+        if mapping.plugin or mapping.target:
+            if mapping.assigned:
+                raise ValueError(f"Strip {strip}: send it to jack_mixer or to a plugin, not both.")
+            _check_plugin_route(f"Strip {strip}", mapping.plugin, mapping.target)
+        if (mapping.assigned or mapping.plugin) and not mapping.name.strip():
             raise ValueError(f"Strip {strip}: enter a channel name.")
         if mapping.assigned:
             claim(mapping.volume_cc, f"strip {strip} volume")
@@ -85,16 +106,22 @@ def validate(config):
                 raise ValueError(f"Key {key}: enter a command.")
             if any(c in action.command for c in "\n\r\0"):
                 raise ValueError(f"Key {key}: the command must fit on one line.")
+        elif action.kind == "plugin":
+            _check_plugin_route(f"Key {key}", action.plugin, action.target)
         else:
             raise ValueError(f"Key {key}: unknown action {action.kind!r}.")
 
 
-def _check_private(path):
-    """Shell commands run as you, so only you may be able to change the file that defines them."""
+def check_private(path, purpose):
+    """Refuse a file (or its directory) that someone else could change.
+
+    Used where the file decides what runs as you: shell commands, and which
+    plugins load and with what settings.
+    """
     for target in (path, path.parent):
         info = target.stat()
         if info.st_uid != os.getuid() or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            raise ValueError(f"{target} must be owned by you and not writable by others to use command keys.")
+            raise ValueError(f"{target} must be owned by you and not writable by others {purpose}.")
 
 
 def _cc(section, key):
@@ -110,17 +137,20 @@ def load(path):
         with path.open(encoding="utf-8") as stream:
             parser.read_file(stream)
         version = parser.getint("app", "format_version")
-        if version not in (1, FORMAT_VERSION):
+        if version not in (1, 2, FORMAT_VERSION):
             raise ValueError("Unsupported configuration version.")
         strips = {f"strip{i}" for i in range(1, 9)}
         sections = set(parser.sections())
-        key_sections = {name for name in sections if name.startswith(KEY_SECTION)} if version == FORMAT_VERSION else set()
+        key_sections = {name for name in sections if name.startswith(KEY_SECTION)} if version >= 2 else set()
         if sections - key_sections != {"app", *strips}:
             raise ValueError("Configuration must contain app and strip1 through strip8 sections.")
         config = Config([], {})
         for i in range(1, 9):
             section = parser[f"strip{i}"]
-            config.mappings.append(Mapping(section.get("name", ""), _cc(section, "volume_cc"), _cc(section, "pan_cc")))
+            config.mappings.append(Mapping(
+                section.get("name", ""), _cc(section, "volume_cc"), _cc(section, "pan_cc"),
+                section.get("plugin", "").strip(), section.get("target", "").strip(),
+            ))
             if version == 1:
                 # Format 1 kept mute/solo CCs on the strip; they are now
                 # ordinary toggle MIDI keys.
@@ -137,10 +167,12 @@ def load(path):
                 mode=section.get("mode", "toggle").strip() if kind == "midi" else "toggle",
                 media=section.get("media", "").strip() if kind == "media" else "",
                 command=section.get("command", "") if kind == "command" else "",
+                plugin=section.get("plugin", "").strip() if kind == "plugin" else "",
+                target=section.get("target", "").strip() if kind == "plugin" else "",
             )
         validate(config)
         if any(action.kind == "command" for action in config.keys.values()):
-            _check_private(path)
+            check_private(path, "to use command keys")
         return config
     except (ConfigError, KeyError) as error:
         raise ValueError(f"Invalid configuration: {error}") from error
@@ -156,6 +188,8 @@ def save(path, config):
             "volume_cc": "" if mapping.volume_cc is None else str(mapping.volume_cc),
             "pan_cc": "" if mapping.pan_cc is None else str(mapping.pan_cc),
         }
+        if mapping.plugin:
+            parser[f"strip{i}"].update(plugin=mapping.plugin, target=mapping.target)
     for key in KEY_NOTES:
         action = config.keys.get(key)
         if action is None:
@@ -165,15 +199,22 @@ def save(path, config):
             section.update(cc=str(action.cc), mode=action.mode)
         elif action.kind == "media":
             section["media"] = action.media
+        elif action.kind == "plugin":
+            section.update(plugin=action.plugin, target=action.target)
         else:
             section["command"] = action.command
         parser[KEY_SECTION + key] = section
+    write_atomic(path, parser.write)
+
+
+def write_atomic(path, write):
+    """Replace `path` with what `write(stream)` produces; readers never see a partial file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
             temporary = Path(stream.name)
-            parser.write(stream)
+            write(stream)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
