@@ -1,13 +1,19 @@
 import unittest
 
 from smc_bridge.bridge import Bridge, KEY_NOTES, PAN_CENTER, cc_to_pitchbend, pitchbend_to_cc, relative_delta
-from smc_bridge.config import KeyAction, Mapping
+from smc_bridge.config import KeyAction, Mapping, Route
+
+
+def mixer(name, volume_cc, pan_cc=None):
+    """A strip whose fader (and encoder, if given a CC) go to jack_mixer."""
+    return Mapping(name, Route.midi(volume_cc), None if pan_cc is None else Route.midi(pan_cc))
+
 
 
 def eight(*assigned):
     mappings = [Mapping() for _ in range(8)]
     for strip, name, volume_cc, pan_cc in assigned:
-        mappings[strip] = Mapping(name, volume_cc, pan_cc)
+        mappings[strip] = mixer(name, volume_cc, pan_cc)
     return mappings
 
 
@@ -64,6 +70,13 @@ class BridgeEncoderTests(unittest.TestCase):
         self.assertEqual((cc, value), (12, PAN_CENTER + 2))
         cc, value = bridge.on_encoder(16, 65)
         self.assertEqual((cc, value), (12, PAN_CENTER + 1))
+
+    def test_strip_without_pan_cc_ignores_encoder_but_keeps_fader(self):
+        bridge = Bridge(eight((0, "FT-710 Rx", 19, None)))
+        self.assertIsNone(bridge.on_encoder(16, 1))
+        self.assertEqual(bridge.on_fader(0, 8191), (19, 127))
+        self.assertIsNone(bridge.on_mixer_pan(12, 20))
+        self.assertEqual(bridge.on_mixer_volume(19, 127)[0], 0)
 
     def test_encoder_clamps_at_pan_bounds(self):
         bridge = Bridge(eight((0, "Desk Mic", 11, 12)))

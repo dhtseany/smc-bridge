@@ -8,7 +8,7 @@ import stat
 import tempfile
 import threading
 
-from .config import load
+from .config import STRIP_CONTROLS, load
 from .plugins import PluginHost, load_settings, settings_path
 
 LOG = logging.getLogger(__name__)
@@ -76,8 +76,10 @@ class ConfigurationState:
         return load(self.path)
 
     def _describe(self, config):
-        plugin_strips = sum(bool(m.plugin) for m in config.mappings)
-        return f"{sum(m.assigned for m in config.mappings)} assigned strips{f' and {plugin_strips} plugin strips' if plugin_strips else ''} and {len(config.keys)} key actions"
+        routes = [getattr(m, c) for m in config.mappings for c in STRIP_CONTROLS]
+        to_mixer = sum(r is not None and r.kind == "midi" for r in routes)
+        to_plugins = sum(r is not None and r.kind == "plugin" for r in routes)
+        return f"{to_mixer} faders/encoders to jack_mixer, {to_plugins} to plugins and {len(config.keys)} key actions"
 
 
 class PluginSettingsState(ConfigurationState):

@@ -9,11 +9,11 @@ from PySide6.QtWidgets import (
 
 from .actions import MEDIA_ACTIONS
 from .bridge import KEY_NOTES
-from .config import Config, KeyAction, Mapping, load, save, validate
+from .config import Config, KeyAction, Mapping, Route, load, save, validate
 from . import plugins
 
 ACTION_CHOICES = (("", "Nothing"), ("midi", "MIDI CC to jack_mixer"), ("media", "Media command"), ("command", "Shell command"), ("plugin", "Plugin"))
-ROUTE_CHOICES = (("mixer", "jack_mixer"), ("plugin", "Plugin"))
+ROUTE_CHOICES = (("", "Nothing"), ("midi", "jack_mixer CC"), ("plugin", "Plugin"))
 MODE_CHOICES = (("toggle", "Toggle (press on, press off)"), ("momentary", "Momentary (on while held)"))
 STRIP_KEY_BUTTONS = (("mute", "M", "Mute"), ("solo", "S", "Solo"), ("rec", "R", "R button"), ("select", "□", "Square (Select) button"))
 # Exact left-to-right symbol order from the supplied hardware photo.
@@ -41,6 +41,14 @@ def describe(action):
     return f"runs: {action.command}"
 
 
+def describe_route(route, short=False):
+    if route is None:
+        return "—" if short else "nothing"
+    if route.kind == "midi":
+        return f"CC {route.cc}" if short else f"jack_mixer CC {route.cc}"
+    return route.plugin if short else f"plugin {route.plugin} → {route.target}"
+
+
 def plugin_combo():
     """Installed plugins to pick from; editable, since one may be set up before it is installed."""
     combo = QComboBox()
@@ -49,6 +57,59 @@ def plugin_combo():
     combo.setCurrentIndex(-1)
     combo.lineEdit().setPlaceholderText("e.g. hrdctl")
     return combo
+
+
+class RouteEditor(QWidget):
+    """Where one fader or encoder goes: nothing, a jack_mixer CC, or a plugin target."""
+
+    def __init__(self, title, control, target_placeholder):
+        super().__init__()
+        self.control = control
+        self.form = QFormLayout(self)
+        self.form.setContentsMargins(0, 8, 0, 0)
+        self.form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        self.kind = QComboBox()
+        for value, text in ROUTE_CHOICES:
+            self.kind.addItem(text, value)
+        self.kind.setAccessibleName(f"{title} sends to")
+        self.cc = QSpinBox()
+        self.cc.setRange(-1, 127)
+        self.cc.setSpecialValueText("Choose CC")
+        self.plugin = plugin_combo()
+        self.target = QLineEdit()
+        self.target.setPlaceholderText(target_placeholder)
+        self.form.addRow(label(title.upper(), "eyebrow"))
+        self.form.addRow("Sends to", self.kind)
+        self.form.addRow("CC sent to jack_mixer", self.cc)
+        self.form.addRow("Plugin", self.plugin)
+        self.form.addRow("Plugin target", self.target)
+
+    def connect(self, slot):
+        self.kind.currentIndexChanged.connect(slot)
+        self.cc.valueChanged.connect(slot)
+        self.plugin.currentTextChanged.connect(slot)
+        self.target.textChanged.connect(slot)
+
+    def update_rows(self):
+        kind = self.kind.currentData()
+        for widget, shown in ((self.cc, kind == "midi"), (self.plugin, kind == "plugin"), (self.target, kind == "plugin")):
+            self.form.setRowVisible(widget, shown)
+
+    def set_route(self, route):
+        self.kind.setCurrentIndex(self.kind.findData("" if route is None else route.kind))
+        self.cc.setValue(route.cc if route is not None and route.cc is not None else -1)
+        self.plugin.setCurrentText(route.plugin if route is not None else "")
+        self.target.setText(route.target if route is not None else "")
+
+    def route(self):
+        kind = self.kind.currentData()
+        if kind == "midi":
+            if self.cc.value() < 0:
+                raise ValueError(f"Choose the CC number the {self.control} sends.")
+            return Route.midi(self.cc.value())
+        if kind == "plugin":
+            return Route.to_plugin(self.plugin.currentText().strip(), self.target.text().strip())
+        return None
 
 
 class PluginsDialog(QDialog):
@@ -173,8 +234,9 @@ class Control(QAbstractButton):
             self.setFixedHeight(80)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAccessibleName(f"Map strip {strip} {kind}")
-        self.setToolTip(f"Click to map strip {strip} {kind}; no MIDI is sent")
+        name = "encoder" if kind == "pan" else "fader"
+        self.setAccessibleName(f"Map strip {strip} {name}")
+        self.setToolTip(f"Click to map strip {strip}'s {name}; no MIDI is sent")
         self.clicked.connect(callback)
 
     def paintEvent(self, event):
@@ -209,7 +271,7 @@ class Control(QAbstractButton):
 
 
 class Strip(QFrame):
-    def __init__(self, number, callback, key_callback):
+    def __init__(self, number, callback, key_callback, control_callback):
         super().__init__()
         self.setObjectName("strip")
         self.setMinimumWidth(108)
@@ -223,7 +285,7 @@ class Strip(QFrame):
         # The encoder and fader share an axis; four buttons sit to their right.
         encoder_row = QHBoxLayout()
         encoder_row.setSpacing(4)
-        encoder_row.addWidget(Control("pan", number, callback), 1)
+        encoder_row.addWidget(Control("pan", number, lambda checked=False: control_callback("encoder")), 1)
         encoder_row.addSpacing(28)
         layout.addLayout(encoder_row)
         indicator_row = QHBoxLayout()
@@ -236,7 +298,7 @@ class Strip(QFrame):
         layout.addLayout(indicator_row)
         controls = QHBoxLayout()
         controls.setSpacing(4)
-        controls.addWidget(Control("volume", number, callback), 1)
+        controls.addWidget(Control("volume", number, lambda checked=False: control_callback("fader")), 1)
         buttons = QVBoxLayout()
         buttons.setContentsMargins(0, 12, 0, 18)
         self.key_buttons = {}
@@ -265,13 +327,11 @@ class Strip(QFrame):
         self.setProperty("selected", selected)
         self.style().unpolish(self)
         self.style().polish(self)
-        used = mapping.assigned or bool(mapping.plugin)
+        used = mapping.used
         self.button.setText(mapping.name if used else "Unassigned")
-        self.button.setToolTip(mapping.name if used else "Click to assign a mixer channel")
-        if mapping.plugin:
-            self.mapping_label.setText(f"{mapping.plugin} · {mapping.target}")
-        else:
-            self.mapping_label.setText(f"VOL {mapping.volume_cc} · PAN {mapping.pan_cc}" if mapping.assigned else "—  ·  —")
+        self.button.setToolTip(mapping.name if used else "Click to map this strip's fader and encoder")
+        self.mapping_label.setText(f"{describe_route(mapping.fader, True)} · {describe_route(mapping.encoder, True)}")
+        self.mapping_label.setToolTip(f"Fader: {describe_route(mapping.fader)}\nEncoder: {describe_route(mapping.encoder)}")
 
 
 class Window(QMainWindow):
@@ -315,7 +375,7 @@ class Window(QMainWindow):
         self.save_button.clicked.connect(self.save)
         top.addWidget(self.save_button)
         outer.addLayout(top)
-        outer.addWidget(label("Select a fader, encoder or channel label to map its strip, or any button to choose what it does.", "muted"))
+        outer.addWidget(label("Select a fader, encoder or button to choose what it does. Each one is set on its own.", "muted"))
         outer.addWidget(label("MAPPING EDITOR   ·   This window edits mappings only; live MIDI runs in the separate background daemon (--headless).", "status"))
         body = QHBoxLayout()
         surface = QWidget()
@@ -332,6 +392,7 @@ class Window(QMainWindow):
                 index + 1,
                 lambda checked=False, index=index: self.select(index),
                 self.select_key,
+                lambda control, index=index: self.select_control(index, control),
             )
             self.strips.append(strip)
             strips_layout.addWidget(strip)
@@ -367,6 +428,21 @@ class Window(QMainWindow):
         editor.setFixedWidth(270)
         panel = QVBoxLayout(editor)
         panel.setContentsMargins(16, 0, 0, 0)
+        # Fader and encoder each have their own fields, which outgrow short windows.
+        editor_scroll = QScrollArea()
+        editor_scroll.setWidgetResizable(True)
+        editor_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        editor_scroll.setFixedWidth(270 + editor_scroll.verticalScrollBar().sizeHint().width())
+        editor_scroll.setWidget(editor)
+        # The error and Apply stay in view below the scrolling fields.
+        editor_column = QWidget()
+        editor_column.setFixedWidth(editor_scroll.width())
+        column = QVBoxLayout(editor_column)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.addWidget(editor_scroll, 1)
+        pinned = QVBoxLayout()
+        pinned.setContentsMargins(16, 0, 0, 0)
+        column.addLayout(pinned)
         self.editor_title = label("", "title")
         panel.addWidget(self.editor_title)
         self.input_hint = label("", "muted")
@@ -376,33 +452,23 @@ class Window(QMainWindow):
         strip_page = QWidget()
         strip_layout = QVBoxLayout(strip_page)
         strip_layout.setContentsMargins(0, 0, 0, 0)
-        self.enabled = QCheckBox("Assign this strip")
-        strip_layout.addWidget(self.enabled)
         self.name = QLineEdit()
         self.name.setPlaceholderText("e.g. Desk Mic")
         self.name.setMaxLength(80)
-        self.volume = QSpinBox()
-        self.pan = QSpinBox()
         self.key_cc = QSpinBox()
-        for spin in (self.volume, self.pan, self.key_cc):
-            spin.setRange(-1, 127)
-            spin.setSpecialValueText("Choose CC")
-        self.route = QComboBox()
-        for value, text in ROUTE_CHOICES:
-            self.route.addItem(text, value)
-        self.strip_plugin = plugin_combo()
-        self.strip_target = QLineEdit()
-        self.strip_target.setPlaceholderText("e.g. vfo_a")
-        self.strip_form = QFormLayout()
-        self.strip_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        self.strip_form.addRow("Channel name", self.name)
-        self.strip_form.addRow("Send to", self.route)
-        self.strip_form.addRow("Volume CC", self.volume)
-        self.strip_form.addRow("Pan CC", self.pan)
-        self.strip_form.addRow("Plugin", self.strip_plugin)
-        self.strip_form.addRow("Plugin target", self.strip_target)
-        strip_layout.addLayout(self.strip_form)
-        self.strip_note = label("", "muted")
+        self.key_cc.setRange(-1, 127)
+        self.key_cc.setSpecialValueText("Choose CC")
+        name_form = QFormLayout()
+        name_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        name_form.addRow("Channel name", self.name)
+        strip_layout.addLayout(name_form)
+        self.fader = RouteEditor("Fader", "fader", "e.g. af_gain")
+        self.encoder = RouteEditor("Encoder", "encoder", "e.g. vfo_a")
+        strip_layout.addWidget(self.fader)
+        strip_layout.addWidget(self.encoder)
+        self.strip_note = label(
+            "To jack_mixer the encoder works like pan, starting centered. To a plugin the fader sends a "
+            "0-100% level and the encoder steps; the plugin decides what a target means.", "muted")
         self.strip_note.setWordWrap(True)
         strip_layout.addWidget(self.strip_note)
         strip_layout.addStretch()
@@ -438,16 +504,16 @@ class Window(QMainWindow):
         self.key_form.addRow(self.key_note)
         self.pages.addWidget(key_page)
         panel.addWidget(self.pages)
+        panel.addStretch()
         self.error = label("", "error")
         self.error.setWordWrap(True)
-        panel.addWidget(self.error)
+        pinned.addWidget(self.error)
         self.apply_button = QPushButton("Apply")
         self.apply_button.setObjectName("primary")
         self.apply_button.clicked.connect(self.apply)
-        panel.addWidget(self.apply_button)
-        panel.addStretch()
-        panel.addWidget(label("8 STRIPS / NO BANKING", "eyebrow"))
-        body.addWidget(editor)
+        pinned.addWidget(self.apply_button)
+        pinned.addWidget(label("8 STRIPS / NO BANKING", "eyebrow"))
+        body.addWidget(editor_column)
         outer.addLayout(body, 1)
         self.feedback = label("", "muted")
         self.feedback.setWordWrap(True)
@@ -456,35 +522,25 @@ class Window(QMainWindow):
         path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         path_label.setWordWrap(True)
         outer.addWidget(path_label)
-        self.enabled.toggled.connect(self.edited)
         self.name.textChanged.connect(self.edited)
-        self.volume.valueChanged.connect(self.edited)
-        self.pan.valueChanged.connect(self.edited)
-        for combo in (self.action, self.mode, self.media, self.route):
+        self.fader.connect(self.edited)
+        self.encoder.connect(self.edited)
+        for combo in (self.action, self.mode, self.media):
             combo.currentIndexChanged.connect(self.edited)
-        for combo in (self.strip_plugin, self.key_plugin):
-            combo.currentTextChanged.connect(self.edited)
+        self.key_plugin.currentTextChanged.connect(self.edited)
         self.key_cc.valueChanged.connect(self.edited)
-        for line in (self.command, self.strip_target, self.key_target):
+        for line in (self.command, self.key_target):
             line.textChanged.connect(self.edited)
         self.populate()
         self.refresh()
         if initial_error:
             self.feedback.setText(initial_error)
         else:
-            self.feedback.setText("Saved mappings loaded." if path.exists() else "Start by selecting a strip and assigning its mixer channel.")
+            self.feedback.setText("Saved mappings loaded." if path.exists() else "Start by selecting a fader, encoder or button.")
 
     def edited(self, *_):
-        for widget in (self.name, self.route, self.volume, self.pan, self.strip_plugin, self.strip_target):
-            widget.setEnabled(self.enabled.isChecked())
-        to_plugin = self.route.currentData() == "plugin"
-        for widget, shown in ((self.volume, not to_plugin), (self.pan, not to_plugin), (self.strip_plugin, to_plugin), (self.strip_target, to_plugin)):
-            self.strip_form.setRowVisible(widget, shown)
-        self.strip_note.setText(
-            "The fader (as a 0-100% level) and the encoder (as steps) go to the plugin target; what the target means is up to the plugin. Turn plugins on with Plugins…."
-            if to_plugin else
-            "Use the CC numbers assigned to this channel in jack_mixer. Names are labels, not automatic discovery. Mute and Solo are set on their own buttons."
-        )
+        self.fader.update_rows()
+        self.encoder.update_rows()
         kind = self.action.currentData()
         for widget, kinds in (
             (self.key_cc, ("midi",)), (self.mode, ("midi",)), (self.media, ("media",)), (self.command, ("command",)),
@@ -510,17 +566,13 @@ class Window(QMainWindow):
             self.pages.setCurrentIndex(0)
             self.editor_title.setText(f"Strip {self.selected + 1:02}")
             self.input_hint.setText(
-                f"Hardware input: pitch bend ch {self.selected}\n"
-                f"Pan encoder: CC {16 + self.selected}, ch 0\n"
+                f"Fader input: pitch bend ch {self.selected}\n"
+                f"Encoder input: CC {16 + self.selected}, ch 0\n"
                 f"(channel numbers are zero-based)"
             )
-            self.enabled.setChecked(mapping.assigned or bool(mapping.plugin))
             self.name.setText(mapping.name)
-            self.route.setCurrentIndex(self.route.findData("plugin" if mapping.plugin else "mixer"))
-            self.strip_plugin.setCurrentText(mapping.plugin)
-            self.strip_target.setText(mapping.target)
-            self.volume.setValue(mapping.volume_cc if mapping.volume_cc is not None else -1)
-            self.pan.setValue(mapping.pan_cc if mapping.pan_cc is not None else -1)
+            self.fader.set_route(mapping.fader)
+            self.encoder.set_route(mapping.encoder)
         else:
             action = self.config.keys.get(self.selected_key) or KeyAction("")
             self.pages.setCurrentIndex(1)
@@ -571,17 +623,9 @@ class Window(QMainWindow):
                     candidate.keys.pop(self.selected_key, None)
                 else:
                     candidate.keys[self.selected_key] = action
-            elif self.enabled.isChecked() and self.route.currentData() == "plugin":
-                candidate.mappings[self.selected] = Mapping(
-                    self.name.text().strip(),
-                    plugin=self.strip_plugin.currentText().strip(), target=self.strip_target.text().strip(),
-                )
-            elif self.enabled.isChecked():
-                if self.volume.value() < 0 or self.pan.value() < 0:
-                    raise ValueError("Choose both volume and pan CC numbers.")
-                candidate.mappings[self.selected] = Mapping(self.name.text().strip(), self.volume.value(), self.pan.value())
             else:
-                candidate.mappings[self.selected] = Mapping()
+                mapping = Mapping(self.name.text().strip(), self.fader.route(), self.encoder.route())
+                candidate.mappings[self.selected] = mapping if mapping.used else Mapping()
             validate(candidate)
         except ValueError as error:
             self.error.setText(str(error))
@@ -606,6 +650,10 @@ class Window(QMainWindow):
 
     def select(self, index):
         self._navigate(index, None)
+
+    def select_control(self, index, control):
+        if self._navigate(index, None):
+            getattr(self, control).kind.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def select_key(self, key):
         strip = int(key[5]) - 1 if key.startswith("strip") else self.selected
@@ -640,7 +688,7 @@ class Window(QMainWindow):
         self.dirty = False
         self.populate()
         self.refresh()
-        self.feedback.setText("Saved mappings restored." if self.path.exists() else "No saved file found; all strips are unassigned.")
+        self.feedback.setText("Saved mappings restored." if self.path.exists() else "No saved file found; nothing is mapped.")
 
     def closeEvent(self, event):
         if self.dirty or self.draft_dirty:

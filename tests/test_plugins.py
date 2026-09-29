@@ -10,9 +10,19 @@ from unittest.mock import patch
 
 from smc_bridge import plugins
 from smc_bridge.bridge import Bridge, KEY_NOTES
-from smc_bridge.config import Config, KeyAction, Mapping, load, save, validate
+from smc_bridge.config import Config, KeyAction, Mapping, Route, load, save, validate
 from smc_bridge.daemon import PluginSettingsState
 from smc_bridge.plugins import Plugin, PluginHost, PluginSettings, load_settings, set_enabled
+
+
+def mixer(name, volume_cc, pan_cc=None):
+    """A strip whose fader (and encoder, if given a CC) go to jack_mixer."""
+    return Mapping(name, Route.midi(volume_cc), None if pan_cc is None else Route.midi(pan_cc))
+
+
+def plugin_strip(name, plugin, target):
+    """A strip whose fader and encoder both go to one plugin target."""
+    return Mapping(name, Route.to_plugin(plugin, target), Route.to_plugin(plugin, target))
 
 
 def wait_for(condition, timeout=2):
@@ -193,7 +203,7 @@ class HostTests(unittest.TestCase):
 class RoutingTests(unittest.TestCase):
     def test_plugin_strip_sends_fader_and_encoder_to_plugin_not_mixer(self):
         mappings = [Mapping() for _ in range(8)]
-        mappings[7] = Mapping("VFO A", plugin="hrdctl", target="vfo_a")
+        mappings[7] = plugin_strip("VFO A", "hrdctl", "vfo_a")
         bridge = Bridge(mappings)
         self.assertIsNone(bridge.on_fader(7, 0))
         self.assertEqual(bridge.on_plugin_fader(7, 8191), ("hrdctl", "vfo_a", 1.0))
@@ -204,6 +214,20 @@ class RoutingTests(unittest.TestCase):
         self.assertIsNone(bridge.on_plugin_fader(0, 0))
         self.assertIsNone(bridge.on_plugin_encoder(16, 1))
 
+    def test_fader_to_mixer_and_encoder_to_plugin_on_one_strip(self):
+        mappings = [Mapping() for _ in range(8)]
+        mappings[0] = Mapping("FT-710 Rx", Route.midi(19), Route.to_plugin("hrdctl", "vfo_a"))
+        mappings[1] = Mapping("AF", Route.to_plugin("hrdctl", "af_gain"), Route.midi(21))
+        bridge = Bridge(mappings)
+        self.assertEqual(bridge.on_fader(0, 8191), (19, 127))
+        self.assertIsNone(bridge.on_plugin_fader(0, 8191))
+        self.assertIsNone(bridge.on_encoder(16, 1))
+        self.assertEqual(bridge.on_plugin_encoder(16, 1), ("hrdctl", "vfo_a", 1))
+        self.assertIsNone(bridge.on_fader(1, 8191))
+        self.assertEqual(bridge.on_plugin_fader(1, 8191), ("hrdctl", "af_gain", 1.0))
+        self.assertEqual(bridge.on_encoder(17, 1)[0], 21)
+        self.assertIsNone(bridge.on_plugin_encoder(17, 1))
+
     def test_plugin_key_reports_press_and_release(self):
         bridge = Bridge([Mapping() for _ in range(8)], {"transport.record": KeyAction("plugin", plugin="hrdctl", target="ptt")})
         note = KEY_NOTES["transport.record"]
@@ -213,7 +237,7 @@ class RoutingTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def test_plugin_routes_roundtrip(self):
-        mappings = [Mapping("Mic", 11, 12), Mapping("VFO A", plugin="hrdctl", target="vfo_a")] + [Mapping() for _ in range(6)]
+        mappings = [mixer("Mic", 11, 12), plugin_strip("VFO A", "hrdctl", "vfo_a")] + [Mapping() for _ in range(6)]
         config = Config(mappings, {"transport.record": KeyAction("plugin", plugin="hrdctl", target="ptt")})
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mappings.ini"
@@ -222,11 +246,11 @@ class ConfigTests(unittest.TestCase):
 
     def test_invalid_plugin_routes(self):
         for mapping in (
-            Mapping("VFO", 11, 12, plugin="hrdctl", target="vfo_a"),
-            Mapping("VFO", plugin="HRD", target="vfo_a"),
-            Mapping("VFO", plugin="hrdctl", target=" "),
-            Mapping("", plugin="hrdctl", target="vfo_a"),
-            Mapping("VFO", target="vfo_a"),
+            Mapping("VFO", Route("plugin", target="vfo_a")),
+            plugin_strip("VFO", "HRD", "vfo_a"),
+            plugin_strip("VFO", "hrdctl", " "),
+            plugin_strip("", "hrdctl", "vfo_a"),
+            Mapping("VFO", None, Route("wire", target="vfo_a")),
         ):
             with self.subTest(mapping=mapping), self.assertRaises(ValueError):
                 validate(Config([mapping] + [Mapping() for _ in range(7)]))

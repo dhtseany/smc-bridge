@@ -10,26 +10,53 @@ import tempfile
 from .actions import MEDIA_ACTIONS
 from .bridge import KEY_NOTES
 
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 KEY_SECTION = "key:"
 KEY_KINDS = ("midi", "media", "command", "plugin")
+ROUTE_KINDS = ("midi", "plugin")
+STRIP_CONTROLS = ("fader", "encoder")
 MIDI_MODES = ("toggle", "momentary")
 PLUGIN_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 
 
 @dataclass(frozen=True)
-class Mapping:
-    """A strip sends its fader and encoder to jack_mixer CCs, or to a plugin target."""
-    name: str = ""
-    volume_cc: int | None = None
-    pan_cc: int | None = None
+class Route:
+    """Where one fader or encoder goes: a jack_mixer CC ("midi") or a plugin target."""
+    kind: str
+    cc: int | None = None
     plugin: str = ""
     target: str = ""
 
+    @classmethod
+    def midi(cls, cc):
+        return cls("midi", cc=cc)
+
+    @classmethod
+    def to_plugin(cls, plugin, target):
+        return cls("plugin", plugin=plugin, target=target)
+
+
+@dataclass(frozen=True)
+class Mapping:
+    """One strip: a label plus independent routes for its fader and its
+    encoder. Either may be None, and it then does nothing."""
+    name: str = ""
+    fader: Route | None = None
+    encoder: Route | None = None
+
     @property
-    def assigned(self):
-        """Mapped to jack_mixer (plugin strips are not)."""
-        return self.volume_cc is not None and self.pan_cc is not None
+    def used(self):
+        return self.fader is not None or self.encoder is not None
+
+    def cc(self, control):
+        """The jack_mixer CC `control` ("fader" or "encoder") sends, or None."""
+        route = getattr(self, control)
+        return route.cc if route is not None and route.kind == "midi" else None
+
+    def plugin_route(self, control):
+        """The plugin Route of `control`, or None if it is not sent to a plugin."""
+        route = getattr(self, control)
+        return route if route is not None and route.kind == "plugin" else None
 
 
 @dataclass(frozen=True)
@@ -80,17 +107,18 @@ def validate(config):
     for strip, mapping in enumerate(mappings, 1):
         if "\n" in mapping.name or "\r" in mapping.name:
             raise ValueError(f"Strip {strip}: channel names must fit on one line.")
-        if (mapping.volume_cc is None) != (mapping.pan_cc is None):
-            raise ValueError(f"Strip {strip}: assign both volume and pan CCs, or neither.")
-        if mapping.plugin or mapping.target:
-            if mapping.assigned:
-                raise ValueError(f"Strip {strip}: send it to jack_mixer or to a plugin, not both.")
-            _check_plugin_route(f"Strip {strip}", mapping.plugin, mapping.target)
-        if (mapping.assigned or mapping.plugin) and not mapping.name.strip():
+        if mapping.used and not mapping.name.strip():
             raise ValueError(f"Strip {strip}: enter a channel name.")
-        if mapping.assigned:
-            claim(mapping.volume_cc, f"strip {strip} volume")
-            claim(mapping.pan_cc, f"strip {strip} pan")
+        for control in STRIP_CONTROLS:
+            route = getattr(mapping, control)
+            if route is None:
+                continue
+            if route.kind == "midi":
+                claim(route.cc, f"strip {strip} {control}")
+            elif route.kind == "plugin":
+                _check_plugin_route(f"Strip {strip} {control}", route.plugin, route.target)
+            else:
+                raise ValueError(f"Strip {strip} {control}: unknown destination {route.kind!r}.")
     for key, action in config.keys.items():
         if key not in KEY_NOTES:
             raise ValueError(f"Unknown key {key!r}.")
@@ -129,6 +157,28 @@ def _cc(section, key):
     return int(value) if value else None
 
 
+def _load_strip(section, version):
+    name = section.get("name", "")
+    if version >= 4:
+        routes = {}
+        for control in STRIP_CONTROLS:
+            kind = section.get(control, "").strip()
+            routes[control] = Route(
+                kind,
+                cc=_cc(section, f"{control}_cc") if kind == "midi" else None,
+                plugin=section.get(f"{control}_plugin", "").strip() if kind == "plugin" else "",
+                target=section.get(f"{control}_target", "").strip() if kind == "plugin" else "",
+            ) if kind else None
+        return Mapping(name, **routes)
+    # Formats 1-3: volume_cc and pan_cc went to jack_mixer together, or
+    # plugin/target took both the fader and the encoder.
+    plugin, target = section.get("plugin", "").strip(), section.get("target", "").strip()
+    if plugin or target:
+        return Mapping(name, Route.to_plugin(plugin, target), Route.to_plugin(plugin, target))
+    volume, pan = _cc(section, "volume_cc"), _cc(section, "pan_cc")
+    return Mapping(name, None if volume is None else Route.midi(volume), None if pan is None else Route.midi(pan))
+
+
 def load(path):
     if not path.exists():
         return Config()
@@ -137,7 +187,7 @@ def load(path):
         with path.open(encoding="utf-8") as stream:
             parser.read_file(stream)
         version = parser.getint("app", "format_version")
-        if version not in (1, 2, FORMAT_VERSION):
+        if version not in (1, 2, 3, FORMAT_VERSION):
             raise ValueError("Unsupported configuration version.")
         strips = {f"strip{i}" for i in range(1, 9)}
         sections = set(parser.sections())
@@ -147,10 +197,7 @@ def load(path):
         config = Config([], {})
         for i in range(1, 9):
             section = parser[f"strip{i}"]
-            config.mappings.append(Mapping(
-                section.get("name", ""), _cc(section, "volume_cc"), _cc(section, "pan_cc"),
-                section.get("plugin", "").strip(), section.get("target", "").strip(),
-            ))
+            config.mappings.append(_load_strip(section, version))
             if version == 1:
                 # Format 1 kept mute/solo CCs on the strip; they are now
                 # ordinary toggle MIDI keys.
@@ -175,7 +222,8 @@ def load(path):
             check_private(path, "to use command keys")
         # A plugin route fires an action of a plugin you trusted (a radio's
         # push-to-talk, say), so it needs the same protection.
-        if any(m.plugin for m in config.mappings) or any(a.kind == "plugin" for a in config.keys.values()):
+        if (any(m.plugin_route(c) for m in config.mappings for c in STRIP_CONTROLS)
+                or any(a.kind == "plugin" for a in config.keys.values())):
             check_private(path, "to send controls to plugins")
         return config
     except (ConfigError, KeyError) as error:
@@ -187,13 +235,17 @@ def save(path, config):
     parser = ConfigParser(interpolation=None)
     parser["app"] = {"format_version": str(FORMAT_VERSION)}
     for i, mapping in enumerate(config.mappings, 1):
-        parser[f"strip{i}"] = {
-            "name": mapping.name,
-            "volume_cc": "" if mapping.volume_cc is None else str(mapping.volume_cc),
-            "pan_cc": "" if mapping.pan_cc is None else str(mapping.pan_cc),
-        }
-        if mapping.plugin:
-            parser[f"strip{i}"].update(plugin=mapping.plugin, target=mapping.target)
+        section = {"name": mapping.name}
+        for control in STRIP_CONTROLS:
+            route = getattr(mapping, control)
+            section[control] = "" if route is None else route.kind
+            if route is None:
+                continue
+            if route.kind == "midi":
+                section[f"{control}_cc"] = str(route.cc)
+            else:
+                section.update({f"{control}_plugin": route.plugin, f"{control}_target": route.target})
+        parser[f"strip{i}"] = section
     for key in KEY_NOTES:
         action = config.keys.get(key)
         if action is None:

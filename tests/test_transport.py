@@ -2,7 +2,17 @@ import time
 import unittest
 from unittest.mock import Mock, call, patch
 
-from smc_bridge.config import Config, KeyAction, Mapping
+from smc_bridge.config import Config, KeyAction, Mapping, Route
+
+
+def mixer(name, volume_cc, pan_cc=None):
+    """A strip whose fader (and encoder, if given a CC) go to jack_mixer."""
+    return Mapping(name, Route.midi(volume_cc), None if pan_cc is None else Route.midi(pan_cc))
+
+
+def plugin_strip(name, plugin, target):
+    """A strip whose fader and encoder both go to one plugin target."""
+    return Mapping(name, Route.to_plugin(plugin, target), Route.to_plugin(plugin, target))
 
 try:
     from pyalsa import alsaseq
@@ -15,7 +25,7 @@ except ImportError:
 def eight(*assigned, keys=None):
     mappings = [Mapping() for _ in range(8)]
     for strip, name, volume_cc, pan_cc in assigned:
-        mappings[strip] = Mapping(name, volume_cc, pan_cc)
+        mappings[strip] = mixer(name, volume_cc, pan_cc)
     return Config(mappings, dict(keys or {}))
 
 
@@ -193,7 +203,7 @@ class TransportTests(unittest.TestCase):
 
     def test_plugin_strip_and_key_reach_the_plugin_host_not_the_mixer(self):
         config = eight(keys={"transport.record": KeyAction("plugin", plugin="hrdctl", target="ptt")})
-        config.mappings[0] = Mapping("VFO A", plugin="hrdctl", target="vfo_a")
+        config.mappings[0] = plugin_strip("VFO A", "hrdctl", "vfo_a")
         host = Mock()
         transport = Transport(config, clientname="smc-bridge-test-plugins", plugins=host)
         self.addCleanup(transport.stop)

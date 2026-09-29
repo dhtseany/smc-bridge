@@ -7,8 +7,14 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from smc_bridge.config import Config, Mapping, save
+from smc_bridge.config import Config, Mapping, Route, save
 from smc_bridge.daemon import ConfigurationState, InstanceLock
+
+
+def mixer(name, volume_cc, pan_cc=None):
+    """A strip whose fader (and encoder, if given a CC) go to jack_mixer."""
+    return Mapping(name, Route.midi(volume_cc), None if pan_cc is None else Route.midi(pan_cc))
+
 
 
 class DaemonTests(unittest.TestCase):
@@ -17,7 +23,7 @@ class DaemonTests(unittest.TestCase):
             path = Path(directory) / "mappings.ini"
             state = ConfigurationState(path)
             state.refresh(initial=True)
-            config = Config([Mapping("Mic", 11, 12)] + [Mapping() for _ in range(7)])
+            config = Config([mixer("Mic", 11, 12)] + [Mapping() for _ in range(7)])
             save(path, config)
             self.assertTrue(state.refresh())
             self.assertEqual(state.config, config)
@@ -31,7 +37,7 @@ class DaemonTests(unittest.TestCase):
             self.assertEqual(state.config, config)
             save(path, Config())
             self.assertTrue(state.refresh())
-            self.assertFalse(state.config.mappings[0].assigned)
+            self.assertFalse(state.config.mappings[0].used)
 
     def test_instance_lock_and_release(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"XDG_RUNTIME_DIR": directory}):
