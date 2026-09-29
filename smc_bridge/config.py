@@ -78,15 +78,14 @@ class Config:
     keys: dict = field(default_factory=dict)
 
     def without(self, control):
-        """A copy with `control` unset: a key id ("strip2.mute") or a strip's
-        fader or encoder ("strip2.fader"). A strip left with nothing routed
-        is cleared entirely, name included."""
+        """A copy with just `control` unset: a key id ("strip2.mute") or a
+        strip's fader or encoder ("strip2.fader"). The strip's name and other
+        controls are kept."""
         config = Config(list(self.mappings), dict(self.keys))
         strip, _, part = control.partition(".")
         if part in STRIP_CONTROLS:
             index = int(strip[len("strip"):]) - 1
-            mapping = replace(config.mappings[index], **{part: None})
-            config.mappings[index] = mapping if mapping.used else Mapping()
+            config.mappings[index] = replace(config.mappings[index], **{part: None})
         else:
             config.keys.pop(control, None)
         return config
