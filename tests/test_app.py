@@ -4,9 +4,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QCheckBox
+from smc_bridge import plugins
 from smc_bridge.config import Config, KeyAction, Mapping, load, save, validate
-from smc_bridge.gui import Window
+from smc_bridge.gui import PluginsDialog, Window
 
 
 def config(*mappings, **keys):
@@ -99,6 +100,26 @@ class ConfigTests(unittest.TestCase):
                     load(path)
             finally:
                 Path(directory).chmod(0o700)
+
+    def test_plugin_routes_require_a_private_file(self):
+        for routed in (
+            config(Mapping("VFO A", plugin="hrdctl", target="vfo_a")),
+            config(transport__record=KeyAction("plugin", plugin="hrdctl", target="ptt")),
+        ):
+            with self.subTest(config=routed), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "mappings.ini"
+                save(path, routed)
+                self.assertEqual(load(path), routed)
+                path.chmod(0o666)
+                with self.assertRaisesRegex(ValueError, "not writable by others to send controls to plugins"):
+                    load(path)
+                path.chmod(0o600)
+                Path(directory).chmod(0o777)
+                try:
+                    with self.assertRaisesRegex(ValueError, "not writable by others"):
+                        load(path)
+                finally:
+                    Path(directory).chmod(0o700)
 
     def test_non_command_keys_load_from_shared_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -203,6 +224,42 @@ class GuiTests(unittest.TestCase):
         })
         self.assertTrue(window.key_buttons["transport.play"].property("mapped"))
         self.assertFalse(window.key_buttons["transport.up"].property("mapped"))
+
+    def test_strip_and_key_can_be_sent_to_a_plugin(self):
+        window = self.window
+        window.show()
+        window.select(7)
+        window.enabled.setChecked(True)
+        window.name.setText("VFO A")
+        window.route.setCurrentIndex(window.route.findData("plugin"))
+        self.assertFalse(window.strip_form.isRowVisible(window.volume))
+        self.assertTrue(window.strip_form.isRowVisible(window.strip_target))
+        window.strip_plugin.setCurrentText("hrdctl")
+        window.strip_target.setText("vfo_a")
+        window.key_buttons["transport.record"].click()
+        window.action.setCurrentIndex(window.action.findData("plugin"))
+        window.key_plugin.setCurrentText("hrdctl")
+        window.key_target.setText("ptt")
+        self.assertTrue(window.save())
+        saved = load(self.path)
+        self.assertEqual(saved.mappings[7], Mapping("VFO A", plugin="hrdctl", target="vfo_a"))
+        self.assertEqual(saved.keys, {"transport.record": KeyAction("plugin", plugin="hrdctl", target="ptt")})
+        self.assertEqual(window.strips[7].mapping_label.text(), "hrdctl · vfo_a")
+        window.select(7)
+        self.assertEqual(window.route.currentData(), "plugin")
+        self.assertEqual(window.strip_plugin.currentText(), "hrdctl")
+
+    def test_plugins_dialog_toggles_plugins_ini(self):
+        settings = Path(self.temp.name) / "plugins.ini"
+        plugins.set_enabled(settings, "hrdctl", True)
+        dialog = PluginsDialog(settings)
+        box = next(box for box in dialog.findChildren(QCheckBox) if box.text().startswith("hrdctl"))
+        self.assertTrue(box.isChecked())
+        box.setChecked(False)
+        self.assertEqual(plugins.load_settings(settings), {"hrdctl": plugins.PluginSettings(False, {})})
+        # Not installed, so once off it can't be turned back on from here.
+        dialog.close()
+        self.assertFalse(PluginsDialog(settings).findChildren(QCheckBox)[0].isEnabled())
 
     def test_only_the_chosen_actions_fields_are_shown(self):
         window = self.window

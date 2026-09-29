@@ -170,6 +170,33 @@ class Bridge:
         self.pan_state[strip] = new_pan
         return mapping.pan_cc, new_pan
 
+    def on_plugin_fader(self, channel, value):
+        """Physical fader `channel` (0-7) moved to pitch-bend `value`.
+
+        Returns (plugin, target, level) with level 0.0-1.0 if that strip is
+        routed to a plugin, else None.
+        """
+        if not 0 <= channel <= 7 or not self.mappings[channel].plugin:
+            return None
+        mapping = self.mappings[channel]
+        value = max(PITCH_MIN, min(PITCH_MAX, value))
+        return mapping.plugin, mapping.target, (value - PITCH_MIN) / (PITCH_MAX - PITCH_MIN)
+
+    def on_plugin_encoder(self, controller, value):
+        """Physical encoder sent relative CC `controller` (16-23) = `value`.
+
+        Returns (plugin, target, delta) if that strip is routed to a plugin
+        and the value carried a step, else None. Direction follows
+        ENCODER_INCREASES_PAN, as for pan.
+        """
+        strip = controller - 16
+        if not 0 <= strip <= 7 or not self.mappings[strip].plugin:
+            return None
+        delta = relative_delta(value)
+        if delta == 0:
+            return None
+        return self.mappings[strip].plugin, self.mappings[strip].target, delta
+
     def on_mixer_volume(self, cc, value):
         """jack_mixer reported CC `cc` = `value`.
 
@@ -202,9 +229,11 @@ class Bridge:
           ("midi", cc, cc_value, is_on) — send cc_value on cc to jack_mixer
               and light (is_on) or unlight the button's LED;
           ("media", action) — a media command (see actions.MEDIA_ACTIONS);
-          ("command", command_line) — a shell command.
+          ("command", command_line) — a shell command;
+          ("plugin", plugin, target, pressed) — pass to a plugin.
         Toggle MIDI keys flip on press; momentary MIDI keys send 127 on
         press and 0 on release. Media and command keys fire on press only.
+        Plugin keys report both, so a plugin can do push-to-talk.
         """
         key = NOTE_KEYS.get(note)
         action = self.keys.get(key)
@@ -224,6 +253,8 @@ class Bridge:
                 return None
             self.key_state[key] = is_on
             return "midi", action.cc, 127 if is_on else 0, is_on
+        if action.kind == "plugin":
+            return "plugin", action.plugin, action.target, pressed
         if not pressed:
             return None
         if action.kind == "media":

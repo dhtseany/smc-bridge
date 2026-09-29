@@ -1,6 +1,6 @@
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from smc_bridge.config import Config, KeyAction, Mapping
 
@@ -190,6 +190,35 @@ class TransportTests(unittest.TestCase):
             self._wait_for_events(1, timeout=0.5)
             media.assert_called_once_with("play_pause")
             command.assert_called_once_with("notify-send hi")
+
+    def test_plugin_strip_and_key_reach_the_plugin_host_not_the_mixer(self):
+        config = eight(keys={"transport.record": KeyAction("plugin", plugin="hrdctl", target="ptt")})
+        config.mappings[0] = Mapping("VFO A", plugin="hrdctl", target="vfo_a")
+        host = Mock()
+        transport = Transport(config, clientname="smc-bridge-test-plugins", plugins=host)
+        self.addCleanup(transport.stop)
+        transport.start()
+        self._connect(transport.client_id, transport.mixer_out, self.listener.client_id, self.listen_port)
+        source = alsaseq.Sequencer(clientname="smc-bridge-test-plugin-source")
+        port_type = alsaseq.SEQ_PORT_TYPE_MIDI_GENERIC | alsaseq.SEQ_PORT_TYPE_APPLICATION
+        out_port = source.create_simple_port("controls", port_type, alsaseq.SEQ_PORT_CAP_READ | alsaseq.SEQ_PORT_CAP_SUBS_READ)
+        source.connect_ports((source.client_id, out_port), (transport.client_id, transport.smc_in))
+        for kind, data in (
+            (alsaseq.SEQ_EVENT_PITCHBEND, {"control.channel": 0, "control.value": 8191}),
+            (alsaseq.SEQ_EVENT_CONTROLLER, {"control.channel": 0, "control.param": 16, "control.value": 65}),
+        ):
+            event = alsaseq.SeqEvent(kind)
+            event.source = (source.client_id, out_port)
+            event.dest = (alsaseq.SEQ_ADDRESS_SUBSCRIBERS, 0)
+            event.set_data(data)
+            source.output_event(event)
+        source.drain_output()
+        self._send_note(transport, 95, 127)
+        self._send_note(transport, 95, 0)
+        self.assertEqual(self._wait_for_events(1, timeout=0.5), [])
+        host.fader.assert_called_once_with("hrdctl", "vfo_a", 1.0)
+        host.encoder.assert_called_once_with("hrdctl", "vfo_a", -1)
+        self.assertEqual(host.key.call_args_list, [call("hrdctl", "ptt", True), call("hrdctl", "ptt", False)])
 
     def test_momentary_key_releases_on_note_off(self):
         transport = self._transport_with_keys({"transport.record": KeyAction("midi", 40, mode="momentary")})
