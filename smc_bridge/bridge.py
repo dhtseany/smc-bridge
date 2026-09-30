@@ -19,12 +19,13 @@ PAN_CENTER = 64
 
 # Confirmed on hardware 2026-09-25: strip N's Mute button is Note On/Off,
 # channel 0, note (16 + N-1) (strip 1 = note 16, strip 2 = note 17). Solo,
-# Select and R follow the same fixed-base-plus-strip-index scheme; each is
-# confirmed for strip 1 only (primer.md, "Strip buttons").
-SELECT_NOTE_BASE = 0
+# Select and R follow the same fixed-base-plus-strip-index scheme (the Mackie
+# layout: R 0-7, Solo 8-15, Mute 16-23, Select 24-31). R = note 0 and
+# Select = note 24 confirmed on hardware for strip 1, 2026-09-30.
+REC_NOTE_BASE = 0
 SOLO_NOTE_BASE = 8
 MUTE_NOTE_BASE = 16
-REC_NOTE_BASE = 24
+SELECT_NOTE_BASE = 24
 
 # Unverified: assumes jack_mixer treats a toggle key's CC as an absolute
 # level (>=64 means on) rather than toggling on any received message. If
