@@ -132,8 +132,8 @@ class KeyLayoutTests(unittest.TestCase):
         self.assertEqual(KEY_NOTES["strip1.mute"], 16)
         self.assertEqual(KEY_NOTES["strip2.mute"], 17)
         self.assertEqual(KEY_NOTES["strip1.solo"], 8)
-        self.assertEqual(KEY_NOTES["strip1.select"], 0)
-        self.assertEqual(KEY_NOTES["strip1.rec"], 24)
+        self.assertEqual(KEY_NOTES["strip1.select"], 24)
+        self.assertEqual(KEY_NOTES["strip1.rec"], 0)
         self.assertEqual(KEY_NOTES["transport.play"], 94)
         self.assertEqual(KEY_NOTES["transport.right"], 99)
 
@@ -167,8 +167,9 @@ class BridgeKeyTests(unittest.TestCase):
         })
         self.assertEqual(bridge.on_key(94, 127), ("media", "play_pause"))
         self.assertIsNone(bridge.on_key(94, 0))
-        self.assertEqual(bridge.on_key(0, 127), ("command", "notify-send hi"))
-        self.assertIsNone(bridge.on_key(0, 0))
+        select = KEY_NOTES["strip1.select"]
+        self.assertEqual(bridge.on_key(select, 127), ("command", "notify-send hi"))
+        self.assertIsNone(bridge.on_key(select, 0))
 
     def test_unassigned_and_unknown_keys_are_ignored(self):
         bridge = Bridge(eight(), MUTE_SOLO)
